@@ -23,3 +23,16 @@ Common commands
 Notes
 - `--service imessage|sms|auto` controls delivery.
 - Confirm recipient + message before sending.
+
+## Attachments from Daemon Context
+
+⚠️ **Important:** When running as a daemon (launchd), Messages.app cannot access files from `/tmp` or other restricted directories.
+
+**Always copy files to a user directory first:**
+```bash
+mkdir -p ~/Pictures/clawd-share
+cp /tmp/photo.jpg ~/Pictures/clawd-share/
+imsg send --to "+1234567890" --file ~/Pictures/clawd-share/photo.jpg
+```
+
+Files from `/tmp` will appear in the Messages DB but won't actually send (`is_delivered=0`).
