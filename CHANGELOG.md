@@ -16,14 +16,22 @@
 - Groups: `whatsapp.groups`, `telegram.groups`, and `imessage.groups` now act as allowlists when set. Add `"*"` to keep allow-all behavior.
 
 ### Fixes
+- Gateway/CLI: add daemon runtime selection (Node recommended; Bun optional) and document WhatsApp/Baileys Bun WebSocket instability on reconnect.
+- Sub-agents: allow `sessions_spawn` model overrides and error on invalid models. Thanks @azade-c for PR #298.
+- Heartbeat: default interval 30m; clarified default prompt usage and HEARTBEAT.md template behavior.
 - Onboarding: write auth profiles to the multi-agent path (`~/.clawdbot/agents/main/agent/`) so the gateway finds credentials on first startup. Thanks @minghinmatthewlam for PR #327.
 - Docs: add missing `ui:install` setup step in the README. Thanks @hugobarauna for PR #300.
+- Docs: add ClawdHub guide and hubs link for browsing, install, and sync workflows.
+- Docs: add FAQ for PNPM/Bun lockfile migration warning; link AgentSkills spec + ClawdHub guide (`/clawdhub`) from skills docs.
 - Build: import tool-display JSON as a module instead of runtime file reads. Thanks @mukhtharcm for PR #312.
 - Browser: fix `browser snapshot`/`browser act` timeouts under Bun by patching Playwright’s CDP WebSocket selection. Thanks @azade-c for PR #307.
 - Browser: add `--browser-profile` flag and honor profile in tabs routes + browser tool. Thanks @jamesgroat for PR #324.
 - Telegram: stop typing after tool results. Thanks @AbhisekBasu1 for PR #322.
+- Telegram: include sender identity in group envelope headers. (#336)
 - Messages: stop defaulting ack reactions to 👀 when identity emoji is missing.
 - Auto-reply: require slash for control commands to avoid false triggers in normal text.
+- Auto-reply: flag error payloads and improve Bun socket error messaging. Thanks @emanuelst for PR #331.
+- Commands: add `/stop` to the registry and route native aborts to the active chat session. Thanks @nachoiacovino for PR #295.
 - Commands: unify native + text chat commands behind `commands.*` config (Discord/Slack/Telegram). Thanks @thewilloftheshadow for PR #275.
 - Auto-reply: treat steer during compaction as a follow-up, queued until compaction completes.
 - Auth: lock auth profile refreshes to avoid multi-instance OAuth logouts; keep credentials on refresh failure.
@@ -53,6 +61,7 @@
 - Docs: add group chat participation guidance to the AGENTS template.
 - Gmail: stop restart loop when `gog gmail watch serve` fails to bind (address already in use).
 - Linux: auto-attempt lingering during onboarding (try without sudo, fallback to sudo) and prompt on install/restart to keep the gateway alive after logout/idle. Thanks @tobiasbischoff for PR #237.
+- Skills: add Linuxbrew paths to gateway PATH bootstrap so the Skills UI can run brew installers under systemd/minimal environments.
 - TUI: migrate key handling to the updated pi-tui Key matcher API.
 - TUI: add `/elev` alias for `/elevated`.
 - Logging: redact sensitive tokens in verbose tool summaries by default (configurable patterns).
@@ -68,6 +77,7 @@
 - Model: avoid duplicate `missing (missing)` auth labels in `/model` list output.
 - Auth: when `openai` has no API key but Codex OAuth exists, suggest `openai-codex/gpt-5.2` vs `OPENAI_API_KEY`.
 - Docs: clarify auth storage, migration, and OpenAI Codex OAuth onboarding.
+- Docs: clarify per-session sandbox isolation and `perSession` sharing risks.
 - Sandbox: copy inbound media into sandbox workspaces so agent tools can read attachments.
 - Sandbox: enable session tools in sandboxed sessions with spawned-only visibility by default (opt-in `agent.sandbox.sessionToolsVisibility = "all"`).
 - Control UI: show a reading indicator bubble while the assistant is responding.
@@ -93,16 +103,19 @@
 - Slack: fix Slack provider startup under Bun by using a named import for Bolt `App`. Thanks @snopoke for PR #299.
 - Discord: surface missing-permission hints (muted/role overrides) when replies fail.
 - Discord: use channel IDs for DMs instead of user IDs. Thanks @VACInc for PR #261.
+- Discord: treat empty message content as media placeholder so voice messages are not dropped; enables `routing.transcribeAudio`. Thanks @VACInc for PR #339.
 - Docs: clarify Slack manifest scopes (current vs optional) with references. Thanks @jarvis-medmatic for PR #235.
 - Control UI: avoid Slack config ReferenceError by reading slack config snapshots. Thanks @sreekaransrinath for PR #249.
 - Auth: rotate across multiple OAuth profiles with cooldown tracking and email-based profile IDs. Thanks @mukhtharcm for PR #269.
 - Auth: fix multi-account OAuth rotation so round-robin alternates instead of pinning to lastGood. Thanks @mukhtharcm for PR #281.
+- Auth: lock auth profile usage updates and fail fast on 429s during rotation. Thanks @mukhtharcm for PR #342.
 - Configure: stop auto-writing `auth.order` for newly added auth profiles (round-robin default unless explicitly pinned).
 - Telegram: honor routing.groupChat.mentionPatterns for group mention gating. Thanks Kevin Kern (@regenrek) for PR #242.
 - Telegram: gate groups via `telegram.groups` allowlist (align with WhatsApp/iMessage). Thanks @kitze for PR #241.
 - Telegram: support media groups (multi-image messages). Thanks @obviyus for PR #220.
 - Telegram/WhatsApp: parse shared locations (pins, places, live) and expose structured ctx fields. Thanks @nachoiacovino for PR #194.
 - Auto-reply: block unauthorized `/reset` and infer WhatsApp senders from E.164 inputs.
+- Auto-reply: reset corrupted Gemini sessions when function-call ordering breaks. Thanks @VACInc for PR #297.
 - Auto-reply: track compaction count in session status; verbose mode announces auto-compactions.
 - Telegram: notify users when inbound media exceeds size limits. Thanks @jarvis-medmatic for PR #283.
 - Telegram: send GIF media as animations (auto-play) and improve filename sniffing.
@@ -112,6 +125,7 @@
 - Models: extend `clawdbot models` status output with a masked auth overview (profiles, env sources, and OAuth counts).
 
 ### Maintenance
+- Skills: add Himalaya email CLI skill. Thanks @dantelex for PR #335.
 - Agent: add `skipBootstrap` config option. Thanks @onutc for PR #292.
 - UI: add favicon.ico derived from the macOS app icon. Thanks @jeffersonwarrior for PR #305.
 - Tooling: replace tsx with bun for TypeScript execution. Thanks @obviyus for PR #278.

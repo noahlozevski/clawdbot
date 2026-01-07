@@ -23,6 +23,7 @@ import { isAnnounceSkip } from "./sessions-send-helpers.js";
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
   label: Type.Optional(Type.String()),
+  model: Type.Optional(Type.String()),
   timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
   cleanup: Type.Optional(
     Type.Union([Type.Literal("delete"), Type.Literal("keep")]),
@@ -178,6 +179,7 @@ export function createSessionsSpawnTool(opts?: {
       const params = args as Record<string, unknown>;
       const task = readStringParam(params, "task", { required: true });
       const label = typeof params.label === "string" ? params.label.trim() : "";
+      const model = readStringParam(params, "model");
       const cleanup =
         params.cleanup === "keep" || params.cleanup === "delete"
           ? (params.cleanup as "keep" | "delete")
@@ -227,6 +229,27 @@ export function createSessionsSpawnTool(opts?: {
           });
         } catch {
           // best-effort; scoping relies on this metadata but spawning still works without it
+        }
+      }
+      if (model) {
+        try {
+          await callGateway({
+            method: "sessions.patch",
+            params: { key: childSessionKey, model },
+            timeoutMs: 10_000,
+          });
+        } catch (err) {
+          const messageText =
+            err instanceof Error
+              ? err.message
+              : typeof err === "string"
+                ? err
+                : "error";
+          return jsonResult({
+            status: "error",
+            error: messageText,
+            childSessionKey,
+          });
         }
       }
       const childSystemPrompt = buildSubagentSystemPrompt({

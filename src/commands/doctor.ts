@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { confirm, intro, note, outro } from "@clack/prompts";
+import { confirm, intro, note, outro, select } from "@clack/prompts";
 
 import {
   DEFAULT_SANDBOX_BROWSER_IMAGE,
@@ -34,6 +34,11 @@ import { defaultRuntime } from "../runtime.js";
 import { readTelegramAllowFromStore } from "../telegram/pairing-store.js";
 import { resolveTelegramToken } from "../telegram/token.js";
 import { normalizeE164, resolveUserPath, sleep } from "../utils.js";
+import {
+  DEFAULT_GATEWAY_DAEMON_RUNTIME,
+  GATEWAY_DAEMON_RUNTIME_OPTIONS,
+  type GatewayDaemonRuntime,
+} from "./daemon-runtime.js";
 import {
   detectLegacyStateMigrations,
   runLegacyStateMigrations,
@@ -768,12 +773,24 @@ async function maybeMigrateLegacyGatewayService(
   );
   if (!install) return;
 
+  const daemonRuntime = guardCancel(
+    await select({
+      message: "Gateway daemon runtime",
+      options: GATEWAY_DAEMON_RUNTIME_OPTIONS,
+      initialValue: DEFAULT_GATEWAY_DAEMON_RUNTIME,
+    }),
+    runtime,
+  ) as GatewayDaemonRuntime;
   const devMode =
     process.argv[1]?.includes(`${path.sep}src${path.sep}`) &&
     process.argv[1]?.endsWith(".ts");
   const port = resolveGatewayPort(cfg, process.env);
   const { programArguments, workingDirectory } =
-    await resolveGatewayProgramArguments({ port, dev: devMode });
+    await resolveGatewayProgramArguments({
+      port,
+      dev: devMode,
+      runtime: daemonRuntime,
+    });
   const environment: Record<string, string | undefined> = {
     PATH: process.env.PATH,
     CLAWDBOT_GATEWAY_TOKEN:

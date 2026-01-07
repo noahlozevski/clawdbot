@@ -16,6 +16,16 @@ import { resolveClawdbotAgentDir } from "./agent-paths.js";
 const AUTH_STORE_VERSION = 1;
 const AUTH_PROFILE_FILENAME = "auth-profiles.json";
 const LEGACY_AUTH_FILENAME = "auth.json";
+const AUTH_STORE_LOCK_OPTIONS = {
+  retries: {
+    retries: 10,
+    factor: 2,
+    minTimeout: 100,
+    maxTimeout: 10_000,
+    randomize: true,
+  },
+  stale: 30_000,
+} as const;
 
 export type ApiKeyCredential = {
   type: "api_key";
@@ -87,6 +97,45 @@ function ensureAuthStoreFile(pathname: string) {
   saveJsonFile(pathname, payload);
 }
 
+function syncAuthProfileStore(
+  target: AuthProfileStore,
+  source: AuthProfileStore,
+): void {
+  target.version = source.version;
+  target.profiles = source.profiles;
+  target.lastGood = source.lastGood;
+  target.usageStats = source.usageStats;
+}
+
+async function updateAuthProfileStoreWithLock(params: {
+  agentDir?: string;
+  updater: (store: AuthProfileStore) => boolean;
+}): Promise<AuthProfileStore | null> {
+  const authPath = resolveAuthStorePath(params.agentDir);
+  ensureAuthStoreFile(authPath);
+
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(authPath, AUTH_STORE_LOCK_OPTIONS);
+    const store = ensureAuthProfileStore(params.agentDir);
+    const shouldSave = params.updater(store);
+    if (shouldSave) {
+      saveAuthProfileStore(store, params.agentDir);
+    }
+    return store;
+  } catch {
+    return null;
+  } finally {
+    if (release) {
+      try {
+        await release();
+      } catch {
+        // ignore unlock errors
+      }
+    }
+  }
+}
+
 function buildOAuthApiKey(
   provider: OAuthProvider,
   credentials: OAuthCredentials,
@@ -112,14 +161,7 @@ async function refreshOAuthTokenWithLock(params: {
   let release: (() => Promise<void>) | undefined;
   try {
     release = await lockfile.lock(authPath, {
-      retries: {
-        retries: 10,
-        factor: 2,
-        minTimeout: 100,
-        maxTimeout: 10_000,
-        randomize: true,
-      },
-      stale: 30_000,
+      ...AUTH_STORE_LOCK_OPTIONS,
     });
 
     const store = ensureAuthProfileStore(params.agentDir);
@@ -355,13 +397,32 @@ export function isProfileInCooldown(
 
 /**
  * Mark a profile as successfully used. Resets error count and updates lastUsed.
+ * Uses store lock to avoid overwriting concurrent usage updates.
  */
-export function markAuthProfileUsed(params: {
+export async function markAuthProfileUsed(params: {
   store: AuthProfileStore;
   profileId: string;
   agentDir?: string;
-}): void {
+}): Promise<void> {
   const { store, profileId, agentDir } = params;
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir,
+    updater: (freshStore) => {
+      if (!freshStore.profiles[profileId]) return false;
+      freshStore.usageStats = freshStore.usageStats ?? {};
+      freshStore.usageStats[profileId] = {
+        ...freshStore.usageStats[profileId],
+        lastUsed: Date.now(),
+        errorCount: 0,
+        cooldownUntil: undefined,
+      };
+      return true;
+    },
+  });
+  if (updated) {
+    syncAuthProfileStore(store, updated);
+    return;
+  }
   if (!store.profiles[profileId]) return;
 
   store.usageStats = store.usageStats ?? {};
@@ -385,13 +446,38 @@ export function calculateAuthProfileCooldownMs(errorCount: number): number {
 /**
  * Mark a profile as failed/rate-limited. Applies exponential backoff cooldown.
  * Cooldown times: 1min, 5min, 25min, max 1 hour.
+ * Uses store lock to avoid overwriting concurrent usage updates.
  */
-export function markAuthProfileCooldown(params: {
+export async function markAuthProfileCooldown(params: {
   store: AuthProfileStore;
   profileId: string;
   agentDir?: string;
-}): void {
+}): Promise<void> {
   const { store, profileId, agentDir } = params;
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir,
+    updater: (freshStore) => {
+      if (!freshStore.profiles[profileId]) return false;
+
+      freshStore.usageStats = freshStore.usageStats ?? {};
+      const existing = freshStore.usageStats[profileId] ?? {};
+      const errorCount = (existing.errorCount ?? 0) + 1;
+
+      // Exponential backoff: 1min, 5min, 25min, capped at 1h
+      const backoffMs = calculateAuthProfileCooldownMs(errorCount);
+
+      freshStore.usageStats[profileId] = {
+        ...existing,
+        errorCount,
+        cooldownUntil: Date.now() + backoffMs,
+      };
+      return true;
+    },
+  });
+  if (updated) {
+    syncAuthProfileStore(store, updated);
+    return;
+  }
   if (!store.profiles[profileId]) return;
 
   store.usageStats = store.usageStats ?? {};
@@ -411,13 +497,31 @@ export function markAuthProfileCooldown(params: {
 
 /**
  * Clear cooldown for a profile (e.g., manual reset).
+ * Uses store lock to avoid overwriting concurrent usage updates.
  */
-export function clearAuthProfileCooldown(params: {
+export async function clearAuthProfileCooldown(params: {
   store: AuthProfileStore;
   profileId: string;
   agentDir?: string;
-}): void {
+}): Promise<void> {
   const { store, profileId, agentDir } = params;
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir,
+    updater: (freshStore) => {
+      if (!freshStore.usageStats?.[profileId]) return false;
+
+      freshStore.usageStats[profileId] = {
+        ...freshStore.usageStats[profileId],
+        errorCount: 0,
+        cooldownUntil: undefined,
+      };
+      return true;
+    },
+  });
+  if (updated) {
+    syncAuthProfileStore(store, updated);
+    return;
+  }
   if (!store.usageStats?.[profileId]) return;
 
   store.usageStats[profileId] = {
@@ -585,13 +689,26 @@ export async function resolveApiKeyForProfile(params: {
   }
 }
 
-export function markAuthProfileGood(params: {
+export async function markAuthProfileGood(params: {
   store: AuthProfileStore;
   provider: string;
   profileId: string;
   agentDir?: string;
-}): void {
+}): Promise<void> {
   const { store, provider, profileId, agentDir } = params;
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir,
+    updater: (freshStore) => {
+      const profile = freshStore.profiles[profileId];
+      if (!profile || profile.provider !== provider) return false;
+      freshStore.lastGood = { ...freshStore.lastGood, [provider]: profileId };
+      return true;
+    },
+  });
+  if (updated) {
+    syncAuthProfileStore(store, updated);
+    return;
+  }
   const profile = store.profiles[profileId];
   if (!profile || profile.provider !== provider) return;
   store.lastGood = { ...store.lastGood, [provider]: profileId };

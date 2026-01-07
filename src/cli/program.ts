@@ -19,6 +19,7 @@ import {
   writeConfigFile,
 } from "../config/config.js";
 import { danger, setVerbose } from "../globals.js";
+import { autoMigrateLegacyAgentDir } from "../infra/state-migrations.js";
 import { loginWeb, logoutWeb } from "../provider-web.js";
 import { defaultRuntime } from "../runtime.js";
 import { VERSION } from "../version.js";
@@ -127,6 +128,11 @@ export function buildProgram() {
     );
     process.exit(1);
   });
+  program.hook("preAction", async (_thisCommand, actionCommand) => {
+    if (actionCommand.name() === "doctor") return;
+    const cfg = loadConfig();
+    await autoMigrateLegacyAgentDir({ cfg });
+  });
   const examples = [
     [
       "clawdbot login --verbose",
@@ -222,6 +228,7 @@ export function buildProgram() {
     .option("--tailscale <mode>", "Tailscale: off|serve|funnel")
     .option("--tailscale-reset-on-exit", "Reset tailscale serve/funnel on exit")
     .option("--install-daemon", "Install gateway daemon")
+    .option("--daemon-runtime <runtime>", "Daemon runtime: node|bun")
     .option("--skip-skills", "Skip skills setup")
     .option("--skip-health", "Skip health check")
     .option("--node-manager <name>", "Node manager for skills: npm|pnpm|bun")
@@ -262,6 +269,7 @@ export function buildProgram() {
             tailscale: opts.tailscale as "off" | "serve" | "funnel" | undefined,
             tailscaleResetOnExit: Boolean(opts.tailscaleResetOnExit),
             installDaemon: Boolean(opts.installDaemon),
+            daemonRuntime: opts.daemonRuntime as "node" | "bun" | undefined,
             skipSkills: Boolean(opts.skipSkills),
             skipHealth: Boolean(opts.skipHealth),
             nodeManager: opts.nodeManager as "npm" | "pnpm" | "bun" | undefined,

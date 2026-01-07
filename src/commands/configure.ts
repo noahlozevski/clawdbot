@@ -35,6 +35,11 @@ import {
   isRemoteEnvironment,
   loginAntigravityVpsAware,
 } from "./antigravity-oauth.js";
+import {
+  DEFAULT_GATEWAY_DAEMON_RUNTIME,
+  GATEWAY_DAEMON_RUNTIME_OPTIONS,
+  type GatewayDaemonRuntime,
+} from "./daemon-runtime.js";
 import { healthCommand } from "./health.js";
 import {
   applyAuthProfileConfig,
@@ -145,6 +150,14 @@ async function promptGatewayConfig(
 
   let tailscaleResetOnExit = false;
   if (tailscaleMode !== "off") {
+    note(
+      [
+        "Docs:",
+        "https://docs.clawd.bot/gateway/tailscale",
+        "https://docs.clawd.bot/web",
+      ].join("\n"),
+      "Tailscale",
+    );
     tailscaleResetOnExit = Boolean(
       guardCancel(
         await confirm({
@@ -295,6 +308,7 @@ async function promptAuthConfig(
     } catch (err) {
       spin.stop("OAuth failed");
       runtime.error(String(err));
+      note("Trouble with OAuth? See https://docs.clawd.bot/start/faq", "OAuth");
     }
   } else if (authChoice === "openai-codex") {
     const isRemote = isRemoteEnvironment();
@@ -368,6 +382,7 @@ async function promptAuthConfig(
     } catch (err) {
       spin.stop("OpenAI OAuth failed");
       runtime.error(String(err));
+      note("Trouble with OAuth? See https://docs.clawd.bot/start/faq", "OAuth");
     }
   } else if (authChoice === "antigravity") {
     const isRemote = isRemoteEnvironment();
@@ -442,6 +457,7 @@ async function promptAuthConfig(
     } catch (err) {
       spin.stop("Antigravity OAuth failed");
       runtime.error(String(err));
+      note("Trouble with OAuth? See https://docs.clawd.bot/start/faq", "OAuth");
     }
   } else if (authChoice === "apiKey") {
     const key = guardCancel(
@@ -502,11 +518,13 @@ async function maybeInstallDaemon(params: {
   runtime: RuntimeEnv;
   port: number;
   gatewayToken?: string;
+  daemonRuntime?: GatewayDaemonRuntime;
 }) {
   const service = resolveGatewayService();
   const loaded = await service.isLoaded({ env: process.env });
   let shouldCheckLinger = false;
   let shouldInstall = true;
+  let daemonRuntime = params.daemonRuntime ?? DEFAULT_GATEWAY_DAEMON_RUNTIME;
   if (loaded) {
     const action = guardCancel(
       await select({
@@ -531,11 +549,25 @@ async function maybeInstallDaemon(params: {
   }
 
   if (shouldInstall) {
+    if (!params.daemonRuntime) {
+      daemonRuntime = guardCancel(
+        await select({
+          message: "Gateway daemon runtime",
+          options: GATEWAY_DAEMON_RUNTIME_OPTIONS,
+          initialValue: DEFAULT_GATEWAY_DAEMON_RUNTIME,
+        }),
+        params.runtime,
+      ) as GatewayDaemonRuntime;
+    }
     const devMode =
       process.argv[1]?.includes(`${path.sep}src${path.sep}`) &&
       process.argv[1]?.endsWith(".ts");
     const { programArguments, workingDirectory } =
-      await resolveGatewayProgramArguments({ port: params.port, dev: devMode });
+      await resolveGatewayProgramArguments({
+        port: params.port,
+        dev: devMode,
+        runtime: daemonRuntime,
+      });
     const environment: Record<string, string | undefined> = {
       PATH: process.env.PATH,
       CLAWDBOT_GATEWAY_TOKEN: params.gatewayToken,
@@ -587,9 +619,11 @@ export async function runConfigureWizard(
     note(summarizeExistingConfig(baseConfig), title);
     if (!snapshot.valid && snapshot.issues.length > 0) {
       note(
-        snapshot.issues
-          .map((iss) => `- ${iss.path}: ${iss.message}`)
-          .join("\n"),
+        [
+          ...snapshot.issues.map((iss) => `- ${iss.path}: ${iss.message}`),
+          "",
+          "Docs: https://docs.clawd.bot/gateway/configuration",
+        ].join("\n"),
         "Config issues",
       );
     }
@@ -768,6 +802,14 @@ export async function runConfigureWizard(
       await healthCommand({ json: false, timeoutMs: 10_000 }, runtime);
     } catch (err) {
       runtime.error(`Health check failed: ${String(err)}`);
+      note(
+        [
+          "Docs:",
+          "https://docs.clawd.bot/gateway/health",
+          "https://docs.clawd.bot/gateway/troubleshooting",
+        ].join("\n"),
+        "Health check help",
+      );
     }
   }
 
@@ -776,20 +818,22 @@ export async function runConfigureWizard(
     runtime.error(controlUiAssets.message);
   }
 
-  note(
-    (() => {
-      const bind = nextConfig.gateway?.bind ?? "loopback";
-      const links = resolveControlUiLinks({
-        bind,
-        port: gatewayPort,
-        basePath: nextConfig.gateway?.controlUi?.basePath,
-      });
-      return [`Web UI: ${links.httpUrl}`, `Gateway WS: ${links.wsUrl}`].join(
-        "\n",
-      );
-    })(),
-    "Control UI",
-  );
+    note(
+      (() => {
+        const bind = nextConfig.gateway?.bind ?? "loopback";
+        const links = resolveControlUiLinks({
+          bind,
+          port: gatewayPort,
+          basePath: nextConfig.gateway?.controlUi?.basePath,
+        });
+        return [
+          `Web UI: ${links.httpUrl}`,
+          `Gateway WS: ${links.wsUrl}`,
+          "Docs: https://docs.clawd.bot/web/control-ui",
+        ].join("\n");
+      })(),
+      "Control UI",
+    );
 
   const browserSupport = await detectBrowserOpenSupport();
   if (!browserSupport.ok) {

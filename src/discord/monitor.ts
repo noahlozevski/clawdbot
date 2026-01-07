@@ -662,9 +662,9 @@ export function createDiscordMessageHandler(params: {
 
       const media = await resolveMedia(message, mediaMaxBytes);
       const text =
-        message.content?.trim() ??
-        media?.placeholder ??
-        message.embeds?.[0]?.description ??
+        message.content?.trim() ||
+        media?.placeholder ||
+        message.embeds?.[0]?.description ||
         "";
       if (!text) {
         logVerbose(`discord: drop message ${message.id} (empty content)`);
@@ -1178,6 +1178,7 @@ function createDiscordNativeCommand(params: {
         From: isDirectMessage ? `discord:${user.id}` : `group:${channelId}`,
         To: `slash:${user.id}`,
         SessionKey: `agent:${route.agentId}:${sessionPrefix}:${user.id}`,
+        CommandTargetSessionKey: route.sessionKey,
         AccountId: route.accountId,
         ChatType: isDirectMessage ? "direct" : "group",
         GroupSubject: isGuild ? interaction.guild?.name : undefined,

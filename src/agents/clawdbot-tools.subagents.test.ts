@@ -201,4 +201,110 @@ describe("subagents", () => {
       message: "hello from sub",
     });
   });
+
+  it("sessions_spawn applies a model to the child session", async () => {
+    callGatewayMock.mockReset();
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+    let agentCallCount = 0;
+    let lastWaitedRunId: string | undefined;
+    const replyByRunId = new Map<string, string>();
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "sessions.patch") {
+        return { ok: true };
+      }
+      if (request.method === "agent") {
+        agentCallCount += 1;
+        const runId = `run-${agentCallCount}`;
+        const params = request.params as
+          | { message?: string; sessionKey?: string }
+          | undefined;
+        const message = params?.message ?? "";
+        const reply =
+          message === "Sub-agent announce step." ? "ANNOUNCE_SKIP" : "done";
+        replyByRunId.set(runId, reply);
+        return {
+          runId,
+          status: "accepted",
+          acceptedAt: 3000 + agentCallCount,
+        };
+      }
+      if (request.method === "agent.wait") {
+        const params = request.params as { runId?: string } | undefined;
+        lastWaitedRunId = params?.runId;
+        return { runId: params?.runId ?? "run-1", status: "ok" };
+      }
+      if (request.method === "chat.history") {
+        const text =
+          (lastWaitedRunId && replyByRunId.get(lastWaitedRunId)) ?? "";
+        return {
+          messages: [{ role: "assistant", content: [{ type: "text", text }] }],
+        };
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true };
+      }
+      return {};
+    });
+
+    const tool = createClawdbotTools({
+      agentSessionKey: "discord:group:req",
+      agentSurface: "discord",
+    }).find((candidate) => candidate.name === "sessions_spawn");
+    if (!tool) throw new Error("missing sessions_spawn tool");
+
+    const result = await tool.execute("call3", {
+      task: "do thing",
+      timeoutSeconds: 1,
+      model: "claude-haiku-4-5",
+      cleanup: "keep",
+    });
+    expect(result.details).toMatchObject({ status: "ok", reply: "done" });
+
+    const patchIndex = calls.findIndex(
+      (call) => call.method === "sessions.patch",
+    );
+    const agentIndex = calls.findIndex((call) => call.method === "agent");
+    expect(patchIndex).toBeGreaterThan(-1);
+    expect(agentIndex).toBeGreaterThan(-1);
+    expect(patchIndex).toBeLessThan(agentIndex);
+    const patchCall = calls[patchIndex];
+    expect(patchCall?.params).toMatchObject({
+      key: expect.stringContaining("subagent:"),
+      model: "claude-haiku-4-5",
+    });
+  });
+
+  it("sessions_spawn fails when model override is invalid", async () => {
+    callGatewayMock.mockReset();
+    const calls: Array<{ method?: string; params?: unknown }> = [];
+
+    callGatewayMock.mockImplementation(async (opts: unknown) => {
+      const request = opts as { method?: string; params?: unknown };
+      calls.push(request);
+      if (request.method === "sessions.patch") {
+        throw new Error("invalid model: bad-model");
+      }
+      return {};
+    });
+
+    const tool = createClawdbotTools({
+      agentSessionKey: "main",
+      agentProvider: "whatsapp",
+    }).find((candidate) => candidate.name === "sessions_spawn");
+    if (!tool) throw new Error("missing sessions_spawn tool");
+
+    const result = await tool.execute("call4", {
+      task: "do thing",
+      timeoutSeconds: 1,
+      model: "bad-model",
+    });
+    expect(result.details).toMatchObject({ status: "error" });
+    expect(
+      String((result.details as { error?: string }).error ?? ""),
+    ).toContain("invalid model");
+    expect(calls.some((call) => call.method === "agent")).toBe(false);
+  });
 });

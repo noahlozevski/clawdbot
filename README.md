@@ -22,7 +22,7 @@ If you want a personal, single-user assistant that feels local, fast, and always
 
 [Website](https://clawdbot.com) · [Docs](https://docs.clawd.bot) · Getting Started: [https://docs.clawd.bot/getting-started](https://docs.clawd.bot/getting-started) · Updating: [https://docs.clawd.bot/updating](https://docs.clawd.bot/updating) · Showcase: [https://docs.clawd.bot/showcase](https://docs.clawd.bot/showcase) · FAQ: [https://docs.clawd.bot/faq](https://docs.clawd.bot/faq) · Wizard: [https://docs.clawd.bot/wizard](https://docs.clawd.bot/wizard) · Nix: [https://github.com/clawdbot/nix-clawdbot](https://github.com/clawdbot/nix-clawdbot) · Docker: [https://docs.clawd.bot/docker](https://docs.clawd.bot/docker) · Discord: [https://discord.gg/clawd](https://discord.gg/clawd)
 
-Preferred setup: run the onboarding wizard (`clawdbot onboard`). It walks through gateway, workspace, providers, and skills. The CLI wizard is the recommended path and works on **macOS, Windows, and Linux**.
+Preferred setup: run the onboarding wizard (`clawdbot onboard`). It walks through gateway, workspace, providers, and skills. The CLI wizard is the recommended path and works on **macOS, Linux, and Windows (via WSL2; strongly recommended)**.
 Works with npm, pnpm, or bun.
 New install? Start here: https://docs.clawd.bot/getting-started
 
@@ -41,21 +41,21 @@ Model note: while any model is supported, I strongly recommend **Anthropic Pro/M
 
 Do **not** download prebuilt binaries. Run from source.
 
-Prefer **Bun**. `pnpm` is also supported (see https://docs.clawd.bot/getting-started).
+Prefer `pnpm` for builds from source. Bun is optional for running TypeScript directly.
 
 ```bash
 # Clone this repo
 git clone https://github.com/clawdbot/clawdbot.git
 cd clawdbot
 
-bun install
-bun run ui:install
-bun run ui:build
-bun run build
-bun run clawdbot onboard
+pnpm install
+pnpm ui:install
+pnpm ui:build
+pnpm build
+pnpm clawdbot onboard
 ```
 
-Note: `bun run clawdbot ...` runs TypeScript directly. `bun run build` produces `dist/` for running via Node / the packaged `clawdbot` binary.
+Note: `pnpm clawdbot ...` runs TypeScript directly (via `tsx`). `pnpm build` produces `dist/` for running via Node / the packaged `clawdbot` binary.
 
 ## Quick start (TL;DR)
 
@@ -64,23 +64,23 @@ Runtime: **Node ≥22**.
 Full beginner guide (auth, pairing, providers): https://docs.clawd.bot/getting-started
 
 ```bash
-bun run clawdbot onboard
+pnpm clawdbot onboard
 
-bun run clawdbot gateway --port 18789 --verbose
+pnpm clawdbot gateway --port 18789 --verbose
 
 # Dev loop (auto-reload on TS changes)
-bun run gateway:watch
+pnpm gateway:watch
 
 # Send a message
-bun run clawdbot send --to +1234567890 --message "Hello from Clawdbot"
+pnpm clawdbot send --to +1234567890 --message "Hello from Clawdbot"
 
 # Talk to the assistant (optionally deliver back to WhatsApp/Telegram/Slack/Discord)
-bun run clawdbot agent --message "Ship checklist" --thinking high
+pnpm clawdbot agent --message "Ship checklist" --thinking high
 ```
 
 Upgrading? https://docs.clawd.bot/updating (and run `clawdbot doctor`).
 
-If you run from source, prefer `bun run clawdbot …` or `pnpm clawdbot …` (not global `clawdbot`).
+If you run from source, prefer `pnpm clawdbot …` (not global `clawdbot`).
 
 ## Security defaults (DM access)
 
@@ -369,7 +369,7 @@ Use these when you’re past the onboarding flow and want the deeper reference.
 - [Wire external triggers via the webhook surface.](https://docs.clawd.bot/webhook)
 - [Set up Gmail Pub/Sub triggers.](https://docs.clawd.bot/gmail-pubsub)
 - [Learn the macOS menu bar companion details.](https://docs.clawd.bot/mac/menu-bar)
-- [Platform guides: Windows](https://docs.clawd.bot/windows), [Linux](https://docs.clawd.bot/linux), [macOS](https://docs.clawd.bot/macos), [iOS](https://docs.clawd.bot/ios), [Android](https://docs.clawd.bot/android)
+- [Platform guides: Windows (WSL2)](https://docs.clawd.bot/windows), [Linux](https://docs.clawd.bot/linux), [macOS](https://docs.clawd.bot/macos), [iOS](https://docs.clawd.bot/ios), [Android](https://docs.clawd.bot/android)
 - [Debug common failures with the troubleshooting guide.](https://docs.clawd.bot/troubleshooting)
 - [Review security guidance before exposing anything.](https://docs.clawd.bot/security)
 
@@ -416,7 +416,7 @@ Use these when you’re past the onboarding flow and want the deeper reference.
 - [macOS voice wake](https://docs.clawd.bot/mac/voicewake)
 - [iOS node](https://docs.clawd.bot/ios)
 - [Android node](https://docs.clawd.bot/android)
-- [Windows app](https://docs.clawd.bot/windows)
+- [Windows (WSL2)](https://docs.clawd.bot/windows)
 - [Linux app](https://docs.clawd.bot/linux)
 
 ## Email hooks (Gmail)
@@ -453,4 +453,5 @@ Thanks to all clawtributors:
   <a href="https://github.com/azade-c"><img src="https://avatars.githubusercontent.com/u/252790079?v=4&s=48" width="48" height="48" alt="azade-c" title="azade-c"/></a> <a href="https://github.com/andranik-sahakyan"><img src="https://avatars.githubusercontent.com/u/8908029?v=4&s=48" width="48" height="48" alt="andranik-sahakyan" title="andranik-sahakyan"/></a>
   <a href="https://github.com/adamgall"><img src="https://avatars.githubusercontent.com/u/706929?v=4&s=48" width="48" height="48" alt="adamgall" title="adamgall"/></a> <a href="https://github.com/jalehman"><img src="https://avatars.githubusercontent.com/u/550978?v=4&s=48" width="48" height="48" alt="jalehman" title="jalehman"/></a> <a href="https://github.com/jarvis-medmatic"><img src="https://avatars.githubusercontent.com/u/252428873?v=4&s=48" width="48" height="48" alt="jarvis-medmatic" title="jarvis-medmatic"/></a> <a href="https://github.com/mneves75"><img src="https://avatars.githubusercontent.com/u/2423436?v=4&s=48" width="48" height="48" alt="mneves75" title="mneves75"/></a> <a href="https://github.com/regenrek"><img src="https://avatars.githubusercontent.com/u/5182020?v=4&s=48" width="48" height="48" alt="regenrek" title="regenrek"/></a> <a href="https://github.com/tobiasbischoff"><img src="https://avatars.githubusercontent.com/u/711564?v=4&s=48" width="48" height="48" alt="tobiasbischoff" title="tobiasbischoff"/></a> <a href="https://github.com/MSch"><img src="https://avatars.githubusercontent.com/u/7475?v=4&s=48" width="48" height="48" alt="MSch" title="MSch"/></a> <a href="https://github.com/obviyus"><img src="https://avatars.githubusercontent.com/u/22031114?v=4&s=48" width="48" height="48" alt="obviyus" title="obviyus"/></a> <a href="https://github.com/dbhurley"><img src="https://avatars.githubusercontent.com/u/5251425?v=4&s=48" width="48" height="48" alt="dbhurley" title="dbhurley"/></a>
   <a href="https://github.com/Asleep123"><img src="https://avatars.githubusercontent.com/u/122379135?v=4&s=48" width="48" height="48" alt="Asleep123" title="Asleep123"/></a> <a href="https://github.com/Iamadig"><img src="https://avatars.githubusercontent.com/u/102129234?v=4&s=48" width="48" height="48" alt="Iamadig" title="Iamadig"/></a> <a href="https://github.com/imfing"><img src="https://avatars.githubusercontent.com/u/5097752?v=4&s=48" width="48" height="48" alt="imfing" title="imfing"/></a> <a href="https://github.com/kitze"><img src="https://avatars.githubusercontent.com/u/1160594?v=4&s=48" width="48" height="48" alt="kitze" title="kitze"/></a> <a href="https://github.com/nachoiacovino"><img src="https://avatars.githubusercontent.com/u/50103937?v=4&s=48" width="48" height="48" alt="nachoiacovino" title="nachoiacovino"/></a> <a href="https://github.com/VACInc"><img src="https://avatars.githubusercontent.com/u/3279061?v=4&s=48" width="48" height="48" alt="VACInc" title="VACInc"/></a> <a href="https://github.com/cash-echo-bot"><img src="https://avatars.githubusercontent.com/u/252747386?v=4&s=48" width="48" height="48" alt="cash-echo-bot" title="cash-echo-bot"/></a> <a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?v=4&s=48" width="48" height="48" alt="claude" title="claude"/></a> <a href="https://github.com/kiranjd"><img src="https://avatars.githubusercontent.com/u/25822851?v=4&s=48" width="48" height="48" alt="kiranjd" title="kiranjd"/></a> <a href="https://github.com/pcty-nextgen-service-account"><img src="https://avatars.githubusercontent.com/u/112553441?v=4&s=48" width="48" height="48" alt="pcty-nextgen-service-account" title="pcty-nextgen-service-account"/></a> <a href="https://github.com/minghinmatthewlam"><img src="https://avatars.githubusercontent.com/u/14224566?v=4&s=48" width="48" height="48" alt="minghinmatthewlam" title="minghinmatthewlam"/></a>
+  <a href="https://github.com/ngutman"><img src="https://avatars.githubusercontent.com/u/1540134?v=4&s=48" width="48" height="48" alt="ngutman" title="ngutman"/></a> <a href="https://github.com/onutc"><img src="https://avatars.githubusercontent.com/u/152018508?v=4&s=48" width="48" height="48" alt="onutc" title="onutc"/></a> <a href="https://github.com/oswalpalash"><img src="https://avatars.githubusercontent.com/u/6431196?v=4&s=48" width="48" height="48" alt="oswalpalash" title="oswalpalash"/></a> <a href="https://github.com/snopoke"><img src="https://avatars.githubusercontent.com/u/249606?v=4&s=48" width="48" height="48" alt="snopoke" title="snopoke"/></a> <a href="https://github.com/ManuelHettich"><img src="https://avatars.githubusercontent.com/u/17690367?v=4&s=48" width="48" height="48" alt="ManuelHettich" title="ManuelHettich"/></a> <a href="https://github.com/loukotal"><img src="https://avatars.githubusercontent.com/u/18210858?v=4&s=48" width="48" height="48" alt="loukotal" title="loukotal"/></a> <a href="https://github.com/hugobarauna"><img src="https://avatars.githubusercontent.com/u/2719?v=4&s=48" width="48" height="48" alt="hugobarauna" title="hugobarauna"/></a> <a href="https://github.com/AbhisekBasu1"><img src="https://avatars.githubusercontent.com/u/40645221?v=4&s=48" width="48" height="48" alt="AbhisekBasu1" title="AbhisekBasu1"/></a> <a href="https://github.com/emanuelst"><img src="https://avatars.githubusercontent.com/u/9994339?v=4&s=48" width="48" height="48" alt="emanuelst" title="emanuelst"/></a> <a href="https://github.com/dantelex"><img src="https://avatars.githubusercontent.com/u/631543?v=4&s=48" width="48" height="48" alt="dantelex" title="dantelex"/></a>
 </p>

@@ -12,6 +12,7 @@ import {
   SettingsManager,
   type Skill,
 } from "@mariozechner/pi-coding-agent";
+import { resolveHeartbeatPrompt } from "../auto-reply/heartbeat.js";
 import type { ThinkLevel, VerboseLevel } from "../auto-reply/thinking.js";
 import { formatToolAggregate } from "../auto-reply/tool-meta.js";
 import type { ClawdbotConfig } from "../config/config.js";
@@ -99,6 +100,7 @@ export type EmbeddedPiRunResult = {
     mediaUrl?: string;
     mediaUrls?: string[];
     replyToId?: string;
+    isError?: boolean;
   }>;
   meta: EmbeddedPiRunMeta;
 };
@@ -130,6 +132,17 @@ type EmbeddedRunWaiter = {
   timer: NodeJS.Timeout;
 };
 const EMBEDDED_RUN_WAITERS = new Map<string, Set<EmbeddedRunWaiter>>();
+
+const isAbortError = (err: unknown): boolean => {
+  if (!err || typeof err !== "object") return false;
+  const name = "name" in err ? String(err.name) : "";
+  if (name === "AbortError") return true;
+  const message =
+    "message" in err && typeof err.message === "string"
+      ? err.message.toLowerCase()
+      : "";
+  return message.includes("aborted");
+};
 
 type EmbeddedSandboxInfo = {
   enabled: boolean;
@@ -468,6 +481,9 @@ export async function compactEmbeddedPiSession(params: {
             extraSystemPrompt: params.extraSystemPrompt,
             ownerNumbers: params.ownerNumbers,
             reasoningTagHint,
+            heartbeatPrompt: resolveHeartbeatPrompt(
+              params.config?.agent?.heartbeat?.prompt,
+            ),
             runtimeInfo,
             sandboxInfo,
             toolNames: tools.map((tool) => tool.name),
@@ -764,6 +780,9 @@ export async function runEmbeddedPiAgent(params: {
               extraSystemPrompt: params.extraSystemPrompt,
               ownerNumbers: params.ownerNumbers,
               reasoningTagHint,
+              heartbeatPrompt: resolveHeartbeatPrompt(
+                params.config?.agent?.heartbeat?.prompt,
+              ),
               runtimeInfo,
               sandboxInfo,
               toolNames: tools.map((tool) => tool.name),
@@ -901,7 +920,16 @@ export async function runEmbeddedPiAgent(params: {
                 `embedded run prompt end: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - promptStartedAt}`,
               );
             }
-            await waitForCompactionRetry();
+            try {
+              await waitForCompactionRetry();
+            } catch (err) {
+              // Capture AbortError from waitForCompactionRetry to enable fallback/rotation
+              if (isAbortError(err)) {
+                if (!promptError) promptError = err;
+              } else {
+                throw err;
+              }
+            }
             messagesSnapshot = session.messages.slice();
             sessionIdUsed = session.sessionId;
           } finally {
@@ -972,7 +1000,7 @@ export async function runEmbeddedPiAgent(params: {
           if (shouldRotate) {
             // Mark current profile for cooldown before rotating
             if (lastProfileId) {
-              markAuthProfileCooldown({
+              await markAuthProfileCooldown({
                 store: authStore,
                 profileId: lastProfileId,
               });
@@ -1009,12 +1037,17 @@ export async function runEmbeddedPiAgent(params: {
             usage,
           };
 
-          const replyItems: Array<{ text: string; media?: string[] }> = [];
+          const replyItems: Array<{
+            text: string;
+            media?: string[];
+            isError?: boolean;
+          }> = [];
 
           const errorText = lastAssistant
             ? formatAssistantErrorText(lastAssistant)
             : undefined;
-          if (errorText) replyItems.push({ text: errorText });
+
+          if (errorText) replyItems.push({ text: errorText, isError: true });
 
           const inlineToolResults =
             params.verboseLevel === "on" &&
@@ -1047,6 +1080,7 @@ export async function runEmbeddedPiAgent(params: {
               text: item.text?.trim() ? item.text.trim() : undefined,
               mediaUrls: item.media?.length ? item.media : undefined,
               mediaUrl: item.media?.[0],
+              isError: item.isError,
             }))
             .filter(
               (p) =>
@@ -1057,13 +1091,16 @@ export async function runEmbeddedPiAgent(params: {
             `embedded run done: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - started} aborted=${aborted}`,
           );
           if (lastProfileId) {
-            markAuthProfileGood({
+            await markAuthProfileGood({
               store: authStore,
               provider,
               profileId: lastProfileId,
             });
             // Track usage for round-robin rotation
-            markAuthProfileUsed({ store: authStore, profileId: lastProfileId });
+            await markAuthProfileUsed({
+              store: authStore,
+              profileId: lastProfileId,
+            });
           }
           return {
             payloads: payloads.length ? payloads : undefined,
