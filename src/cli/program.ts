@@ -29,6 +29,7 @@ import { registerCanvasCli } from "./canvas-cli.js";
 import { registerCronCli } from "./cron-cli.js";
 import { createDefaultDeps } from "./deps.js";
 import { registerDnsCli } from "./dns-cli.js";
+import { registerDocsCli } from "./docs-cli.js";
 import { registerGatewayCli } from "./gateway-cli.js";
 import { registerHooksCli } from "./hooks-cli.js";
 import { registerModelsCli } from "./models-cli.js";
@@ -543,6 +544,7 @@ Examples:
   registerTuiCli(program);
   registerCronCli(program);
   registerDnsCli(program);
+  registerDocsCli(program);
   registerHooksCli(program);
   registerPairingCli(program);
   registerTelegramCli(program);
