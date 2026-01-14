@@ -13,7 +13,7 @@ import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readStringArrayParam } from "./common.js";
 import {
   classifySessionKind,
-  deriveProvider,
+  deriveChannel,
   resolveDisplaySessionKey,
   resolveInternalSessionKey,
   resolveMainSessionAlias,
@@ -24,7 +24,8 @@ import {
 type SessionListRow = {
   key: string;
   kind: SessionKind;
-  provider: string;
+  channel: string;
+  label?: string;
   displayName?: string;
   updatedAt?: number | null;
   sessionId?: string;
@@ -36,7 +37,7 @@ type SessionListRow = {
   systemSent?: boolean;
   abortedLastRun?: boolean;
   sendPolicy?: string;
-  lastProvider?: string;
+  lastChannel?: string;
   lastTo?: string;
   lastAccountId?: string;
   transcriptPath?: string;
@@ -45,15 +46,15 @@ type SessionListRow = {
 
 const SessionsListToolSchema = Type.Object({
   kinds: Type.Optional(Type.Array(Type.String())),
-  limit: Type.Optional(Type.Integer({ minimum: 1 })),
-  activeMinutes: Type.Optional(Type.Integer({ minimum: 1 })),
-  messageLimit: Type.Optional(Type.Integer({ minimum: 0 })),
+  limit: Type.Optional(Type.Number({ minimum: 1 })),
+  activeMinutes: Type.Optional(Type.Number({ minimum: 1 })),
+  messageLimit: Type.Optional(Type.Number({ minimum: 0 })),
 });
 
 function resolveSandboxSessionToolsVisibility(
   cfg: ReturnType<typeof loadConfig>,
 ) {
-  return cfg.agent?.sandbox?.sessionToolsVisibility ?? "spawned";
+  return cfg.agents?.defaults?.sandbox?.sessionToolsVisibility ?? "spawned";
 }
 
 export function createSessionsListTool(opts?: {
@@ -126,7 +127,7 @@ export function createSessionsListTool(opts?: {
 
       const sessions = Array.isArray(list?.sessions) ? list.sessions : [];
       const storePath = typeof list?.path === "string" ? list.path : undefined;
-      const routingA2A = cfg.routing?.agentToAgent;
+      const routingA2A = cfg.tools?.agentToAgent;
       const a2aEnabled = routingA2A?.enabled === true;
       const allowPatterns = Array.isArray(routingA2A?.allow)
         ? routingA2A.allow
@@ -177,21 +178,19 @@ export function createSessionsListTool(opts?: {
           mainKey,
         });
 
-        const entryProvider =
-          typeof entry.provider === "string" ? entry.provider : undefined;
-        const lastProvider =
-          typeof entry.lastProvider === "string"
-            ? entry.lastProvider
-            : undefined;
+        const entryChannel =
+          typeof entry.channel === "string" ? entry.channel : undefined;
+        const lastChannel =
+          typeof entry.lastChannel === "string" ? entry.lastChannel : undefined;
         const lastAccountId =
           typeof entry.lastAccountId === "string"
             ? entry.lastAccountId
             : undefined;
-        const derivedProvider = deriveProvider({
+        const derivedChannel = deriveChannel({
           key,
           kind,
-          provider: entryProvider,
-          lastProvider,
+          channel: entryChannel,
+          lastChannel,
         });
 
         const sessionId =
@@ -204,7 +203,8 @@ export function createSessionsListTool(opts?: {
         const row: SessionListRow = {
           key: displayKey,
           kind,
-          provider: derivedProvider,
+          channel: derivedChannel,
+          label: typeof entry.label === "string" ? entry.label : undefined,
           displayName:
             typeof entry.displayName === "string"
               ? entry.displayName
@@ -239,7 +239,7 @@ export function createSessionsListTool(opts?: {
               : undefined,
           sendPolicy:
             typeof entry.sendPolicy === "string" ? entry.sendPolicy : undefined,
-          lastProvider,
+          lastChannel,
           lastTo: typeof entry.lastTo === "string" ? entry.lastTo : undefined,
           lastAccountId,
           transcriptPath,

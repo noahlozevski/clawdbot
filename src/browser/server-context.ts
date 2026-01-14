@@ -1,91 +1,34 @@
 import fs from "node:fs";
-import type { Server } from "node:http";
 
 import { createTargetViaCdp, normalizeCdpWsUrl } from "./cdp.js";
 import {
   isChromeCdpReady,
   isChromeReachable,
   launchClawdChrome,
-  type RunningChrome,
   resolveClawdUserDataDir,
   stopClawdChrome,
 } from "./chrome.js";
-import type { BrowserTab } from "./client.js";
-import type {
-  ResolvedBrowserConfig,
-  ResolvedBrowserProfile,
-} from "./config.js";
+import type { ResolvedBrowserProfile } from "./config.js";
 import { resolveProfile } from "./config.js";
+import type {
+  BrowserRouteContext,
+  BrowserTab,
+  ContextOptions,
+  ProfileContext,
+  ProfileRuntimeState,
+  ProfileStatus,
+} from "./server-context.types.js";
 import { resolveTargetIdFromTabs } from "./target-id.js";
 import { movePathToTrash } from "./trash.js";
 
-export type { BrowserTab };
-
-/**
- * Runtime state for a single profile's Chrome instance.
- */
-export type ProfileRuntimeState = {
-  profile: ResolvedBrowserProfile;
-  running: RunningChrome | null;
-};
-
-export type BrowserServerState = {
-  server: Server;
-  port: number;
-  resolved: ResolvedBrowserConfig;
-  profiles: Map<string, ProfileRuntimeState>;
-};
-
-export type BrowserRouteContext = {
-  state: () => BrowserServerState;
-  forProfile: (profileName?: string) => ProfileContext;
-  listProfiles: () => Promise<ProfileStatus[]>;
-  // Legacy methods delegate to default profile for backward compatibility
-  ensureBrowserAvailable: () => Promise<void>;
-  ensureTabAvailable: (targetId?: string) => Promise<BrowserTab>;
-  isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
-  isReachable: (timeoutMs?: number) => Promise<boolean>;
-  listTabs: () => Promise<BrowserTab[]>;
-  openTab: (url: string) => Promise<BrowserTab>;
-  focusTab: (targetId: string) => Promise<void>;
-  closeTab: (targetId: string) => Promise<void>;
-  stopRunningBrowser: () => Promise<{ stopped: boolean }>;
-  resetProfile: () => Promise<{
-    moved: boolean;
-    from: string;
-    to?: string;
-  }>;
-  mapTabError: (err: unknown) => { status: number; message: string } | null;
-};
-
-export type ProfileContext = {
-  profile: ResolvedBrowserProfile;
-  ensureBrowserAvailable: () => Promise<void>;
-  ensureTabAvailable: (targetId?: string) => Promise<BrowserTab>;
-  isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
-  isReachable: (timeoutMs?: number) => Promise<boolean>;
-  listTabs: () => Promise<BrowserTab[]>;
-  openTab: (url: string) => Promise<BrowserTab>;
-  focusTab: (targetId: string) => Promise<void>;
-  closeTab: (targetId: string) => Promise<void>;
-  stopRunningBrowser: () => Promise<{ stopped: boolean }>;
-  resetProfile: () => Promise<{ moved: boolean; from: string; to?: string }>;
-};
-
-export type ProfileStatus = {
-  name: string;
-  cdpPort: number;
-  cdpUrl: string;
-  color: string;
-  running: boolean;
-  tabCount: number;
-  isDefault: boolean;
-  isRemote: boolean;
-};
-
-type ContextOptions = {
-  getState: () => BrowserServerState | null;
-};
+export type {
+  BrowserRouteContext,
+  BrowserServerState,
+  BrowserTab,
+  ProfileContext,
+  ProfileRuntimeState,
+  ProfileStatus,
+} from "./server-context.types.js";
 
 /**
  * Normalize a CDP WebSocket URL to use the correct base URL.
@@ -156,7 +99,7 @@ function createProfileContext(
     return profileState;
   };
 
-  const setProfileRunning = (running: RunningChrome | null) => {
+  const setProfileRunning = (running: ProfileRuntimeState["running"]) => {
     const profileState = getProfileState();
     profileState.running = running;
   };
@@ -240,7 +183,9 @@ function createProfileContext(
     return await isChromeReachable(profile.cdpUrl, timeoutMs);
   };
 
-  const attachRunning = (running: RunningChrome) => {
+  const attachRunning = (
+    running: NonNullable<ProfileRuntimeState["running"]>,
+  ) => {
     setProfileRunning(running);
     running.proc.on("exit", () => {
       // Guard against server teardown (e.g., SIGUSR1 restart)
@@ -259,6 +204,13 @@ function createProfileContext(
     const httpReachable = await isHttpReachable();
 
     if (!httpReachable) {
+      if (
+        (current.resolved.attachOnly || remoteCdp) &&
+        opts.onEnsureAttachTarget
+      ) {
+        await opts.onEnsureAttachTarget(profile);
+        if (await isHttpReachable(1200)) return;
+      }
       if (current.resolved.attachOnly || remoteCdp) {
         throw new Error(
           remoteCdp
@@ -284,6 +236,10 @@ function createProfileContext(
 
     // We own it but WebSocket failed - restart
     if (current.resolved.attachOnly || remoteCdp) {
+      if (opts.onEnsureAttachTarget) {
+        await opts.onEnsureAttachTarget(profile);
+        if (await isReachable(1200)) return;
+      }
       throw new Error(
         remoteCdp
           ? `Remote CDP websocket for profile "${profile.name}" is not reachable.`

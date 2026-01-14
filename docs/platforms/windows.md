@@ -1,19 +1,55 @@
 ---
-summary: "Windows (WSL2) setup + companion app status"
+summary: "Windows (WSL2) support + companion app status"
 read_when:
   - Installing Clawdbot on Windows
   - Looking for Windows companion app status
-  - Planning platform coverage or contributions
 ---
 # Windows (WSL2)
 
-Clawdbot runs on Windows **via WSL2** (Ubuntu recommended). WSL2 is **strongly
-recommended**; native Windows installs are untested and more problematic. Use
-WSL2 and follow the Linux flow inside it.
+Clawdbot on Windows is recommended **via WSL2** (Ubuntu recommended). The
+CLI + Gateway run inside Linux, which keeps the runtime consistent. Native
+Windows installs are untested and more problematic.
 
-## How to install this correctly
+Native Windows companion apps are planned.
 
-Start here (official WSL2 guide): https://learn.microsoft.com/windows/wsl/install
+## Install (WSL2)
+- [Getting Started](/start/getting-started) (use inside WSL)
+- [Install & updates](/install/updating)
+- Official WSL2 guide (Microsoft): https://learn.microsoft.com/windows/wsl/install
+
+## Gateway
+- [Gateway runbook](/gateway)
+- [Configuration](/gateway/configuration)
+
+## Gateway service install (CLI)
+
+Inside WSL2:
+
+```
+clawdbot onboard --install-daemon
+```
+
+Or:
+
+```
+clawdbot daemon install
+```
+
+Or:
+
+```
+clawdbot configure
+```
+
+Select **Gateway daemon** when prompted.
+
+Repair/migrate:
+
+```
+clawdbot doctor
+```
+
+## Step-by-step WSL2 install
 
 ### 1) Install WSL2 + Ubuntu
 
@@ -59,8 +95,7 @@ Follow the Linux Getting Started flow inside WSL:
 git clone https://github.com/clawdbot/clawdbot.git
 cd clawdbot
 pnpm install
-pnpm ui:install
-pnpm ui:build
+pnpm ui:build # auto-installs UI deps on first run
 pnpm build
 pnpm clawdbot onboard
 ```
@@ -69,5 +104,5 @@ Full guide: [Getting Started](/start/getting-started)
 
 ## Windows companion app
 
-We do not have a Windows companion app yet. It is planned, and we would love
+We do not have a Windows companion app yet. Contributions are welcome if you want
 contributions to make it happen.

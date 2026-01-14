@@ -17,6 +17,8 @@ import {
   type ResolvedTheme,
   type ThemeMode,
 } from "./theme";
+import { truncateText } from "./format";
+import { generateUUID } from "./uuid";
 import {
   startThemeTransition,
   type ThemeTransitionContext,
@@ -28,8 +30,10 @@ import type {
   CronRunLogEntry,
   CronStatus,
   HealthSnapshot,
+  LogEntry,
+  LogLevel,
   PresenceEntry,
-  ProvidersStatusSnapshot,
+  ChannelsStatusSnapshot,
   SessionsListResult,
   SkillStatusReport,
   StatusSummary,
@@ -37,6 +41,7 @@ import type {
 import {
   defaultDiscordActions,
   defaultSlackActions,
+  type ChatQueueItem,
   type CronFormState,
   type DiscordForm,
   type IMessageForm,
@@ -46,7 +51,8 @@ import {
 } from "./ui-types";
 import {
   loadChatHistory,
-  sendChat,
+  sendChatMessage,
+  abortChatRun,
   handleChatEvent,
   type ChatEventPayload,
 } from "./controllers/chat";
@@ -57,7 +63,7 @@ import {
   updateConfigFormValue,
 } from "./controllers/config";
 import {
-  loadProviders,
+  loadChannels,
   logoutWhatsApp,
   saveDiscordConfig,
   saveIMessageConfig,
@@ -75,8 +81,10 @@ import {
 } from "./controllers/cron";
 import {
   loadSkills,
+  type SkillMessage,
 } from "./controllers/skills";
 import { loadDebug } from "./controllers/debug";
+import { loadLogs } from "./controllers/logs";
 
 type EventLogEntry = {
   ts: number;
@@ -85,6 +93,16 @@ type EventLogEntry = {
 };
 
 const TOOL_STREAM_LIMIT = 50;
+const TOOL_STREAM_THROTTLE_MS = 80;
+const TOOL_OUTPUT_CHAR_LIMIT = 120_000;
+const DEFAULT_LOG_LEVEL_FILTERS: Record<LogLevel, boolean> = {
+  trace: true,
+  debug: true,
+  info: true,
+  warn: true,
+  error: true,
+  fatal: true,
+};
 
 type AgentEventPayload = {
   runId: string;
@@ -127,17 +145,25 @@ function extractToolOutputText(value: unknown): string | null {
 
 function formatToolOutput(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
   const contentText = extractToolOutputText(value);
-  if (contentText) return contentText;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
+  let text: string;
+  if (typeof value === "string") {
+    text = value;
+  } else if (contentText) {
+    text = contentText;
+  } else {
+    try {
+      text = JSON.stringify(value, null, 2);
+    } catch {
+      text = String(value);
+    }
   }
+  const truncated = truncateText(text, TOOL_OUTPUT_CHAR_LIMIT);
+  if (!truncated.truncated) return truncated.text;
+  return `${truncated.text}\n\n… truncated (${truncated.total} chars, showing first ${truncated.text.length}).`;
 }
 
 declare global {
@@ -149,6 +175,7 @@ declare global {
 const DEFAULT_CRON_FORM: CronFormState = {
   name: "",
   description: "",
+  agentId: "",
   enabled: true,
   scheduleKind: "every",
   scheduleAt: "",
@@ -161,7 +188,7 @@ const DEFAULT_CRON_FORM: CronFormState = {
   payloadKind: "systemEvent",
   payloadText: "",
   deliver: false,
-  provider: "last",
+  channel: "last",
   to: "",
   timeoutSeconds: "",
   postToMainPrefix: "",
@@ -179,6 +206,8 @@ export class ClawdbotApp extends LitElement {
   @state() lastError: string | null = null;
   @state() eventLog: EventLogEntry[] = [];
   private eventLogBuffer: EventLogEntry[] = [];
+  private toolStreamSyncTimer: number | null = null;
+  private sidebarCloseTimer: number | null = null;
 
   @state() sessionKey = this.settings.sessionKey;
   @state() chatLoading = false;
@@ -190,6 +219,13 @@ export class ClawdbotApp extends LitElement {
   @state() chatStreamStartedAt: number | null = null;
   @state() chatRunId: string | null = null;
   @state() chatThinkingLevel: string | null = null;
+  @state() chatQueue: ChatQueueItem[] = [];
+  @state() toolOutputExpanded = new Set<string>();
+  // Sidebar state for tool output viewing
+  @state() sidebarOpen = false;
+  @state() sidebarContent: string | null = null;
+  @state() sidebarError: string | null = null;
+  @state() splitRatio = this.settings.splitRatio;
 
   @state() nodesLoading = false;
   @state() nodes: Array<Record<string, unknown>> = [];
@@ -199,6 +235,9 @@ export class ClawdbotApp extends LitElement {
   @state() configValid: boolean | null = null;
   @state() configIssues: unknown[] = [];
   @state() configSaving = false;
+  @state() configApplying = false;
+  @state() updateRunning = false;
+  @state() applySessionKey = this.settings.lastActiveSessionKey;
   @state() configSnapshot: ConfigSnapshot | null = null;
   @state() configSchema: unknown | null = null;
   @state() configSchemaVersion: string | null = null;
@@ -208,10 +247,10 @@ export class ClawdbotApp extends LitElement {
   @state() configFormDirty = false;
   @state() configFormMode: "form" | "raw" = "form";
 
-  @state() providersLoading = false;
-  @state() providersSnapshot: ProvidersStatusSnapshot | null = null;
-  @state() providersError: string | null = null;
-  @state() providersLastSuccess: number | null = null;
+  @state() channelsLoading = false;
+  @state() channelsSnapshot: ChannelsStatusSnapshot | null = null;
+  @state() channelsError: string | null = null;
+  @state() channelsLastSuccess: number | null = null;
   @state() whatsappLoginMessage: string | null = null;
   @state() whatsappLoginQrDataUrl: string | null = null;
   @state() whatsappLoginConnected: boolean | null = null;
@@ -219,6 +258,7 @@ export class ClawdbotApp extends LitElement {
   @state() telegramForm: TelegramForm = {
     token: "",
     requireMention: true,
+    groupsWildcardEnabled: false,
     allowFrom: "",
     proxy: "",
     webhookUrl: "",
@@ -329,6 +369,7 @@ export class ClawdbotApp extends LitElement {
   @state() skillsFilter = "";
   @state() skillEdits: Record<string, string> = {};
   @state() skillsBusyKey: string | null = null;
+  @state() skillMessages: Record<string, SkillMessage> = {};
 
   @state() debugLoading = false;
   @state() debugStatus: StatusSummary | null = null;
@@ -340,11 +381,30 @@ export class ClawdbotApp extends LitElement {
   @state() debugCallResult: string | null = null;
   @state() debugCallError: string | null = null;
 
+  @state() logsLoading = false;
+  @state() logsError: string | null = null;
+  @state() logsFile: string | null = null;
+  @state() logsEntries: LogEntry[] = [];
+  @state() logsFilterText = "";
+  @state() logsLevelFilters: Record<LogLevel, boolean> = {
+    ...DEFAULT_LOG_LEVEL_FILTERS,
+  };
+  @state() logsAutoFollow = true;
+  @state() logsTruncated = false;
+  @state() logsCursor: number | null = null;
+  @state() logsLastFetchAt: number | null = null;
+  @state() logsLimit = 500;
+  @state() logsMaxBytes = 250_000;
+  @state() logsAtBottom = true;
+
   client: GatewayBrowserClient | null = null;
   private chatScrollFrame: number | null = null;
   private chatScrollTimeout: number | null = null;
   private chatHasAutoScrolled = false;
+  private chatUserNearBottom = true;
   private nodesPollInterval: number | null = null;
+  private logsPollInterval: number | null = null;
+  private logsScrollFrame: number | null = null;
   private toolStreamById = new Map<string, ToolStreamEntry>();
   private toolStreamOrder: string[] = [];
   basePath = "";
@@ -367,6 +427,7 @@ export class ClawdbotApp extends LitElement {
     this.applySettingsFromUrl();
     this.connect();
     this.startNodesPolling();
+    if (this.tab === "logs") this.startLogsPolling();
   }
 
   protected firstUpdated() {
@@ -376,6 +437,7 @@ export class ClawdbotApp extends LitElement {
   disconnectedCallback() {
     window.removeEventListener("popstate", this.popStateHandler);
     this.stopNodesPolling();
+    this.stopLogsPolling();
     this.detachThemeListener();
     this.topbarObserver?.disconnect();
     this.topbarObserver = null;
@@ -397,6 +459,14 @@ export class ClawdbotApp extends LitElement {
         changed.get("chatLoading") === true &&
         this.chatLoading === false;
       this.scheduleChatScroll(forcedByTab || forcedByLoad || !this.chatHasAutoScrolled);
+    }
+    if (
+      this.tab === "logs" &&
+      (changed.has("logsEntries") || changed.has("logsAutoFollow") || changed.has("tab"))
+    ) {
+      if (this.logsAutoFollow && this.logsAtBottom) {
+        this.scheduleLogsScroll(changed.has("tab") || changed.has("logsAutoFollow"));
+      }
     }
   }
 
@@ -457,10 +527,12 @@ export class ClawdbotApp extends LitElement {
         if (!target) return;
         const distanceFromBottom =
           target.scrollHeight - target.scrollTop - target.clientHeight;
-        const shouldStick = force || distanceFromBottom < 200;
+        const shouldStick =
+          force || this.chatUserNearBottom || distanceFromBottom < 200;
         if (!shouldStick) return;
         if (force) this.chatHasAutoScrolled = true;
         target.scrollTop = target.scrollHeight;
+        this.chatUserNearBottom = true;
         const retryDelay = force ? 150 : 120;
         this.chatScrollTimeout = window.setTimeout(() => {
           this.chatScrollTimeout = null;
@@ -468,8 +540,11 @@ export class ClawdbotApp extends LitElement {
           if (!latest) return;
           const latestDistanceFromBottom =
             latest.scrollHeight - latest.scrollTop - latest.clientHeight;
-          if (!force && latestDistanceFromBottom >= 250) return;
+          const shouldStickRetry =
+            force || this.chatUserNearBottom || latestDistanceFromBottom < 200;
+          if (!shouldStickRetry) return;
           latest.scrollTop = latest.scrollHeight;
+          this.chatUserNearBottom = true;
         }, retryDelay);
       });
     });
@@ -502,14 +577,85 @@ export class ClawdbotApp extends LitElement {
     this.nodesPollInterval = null;
   }
 
+  private startLogsPolling() {
+    if (this.logsPollInterval != null) return;
+    this.logsPollInterval = window.setInterval(() => {
+      if (this.tab !== "logs") return;
+      void loadLogs(this, { quiet: true });
+    }, 2000);
+  }
+
+  private stopLogsPolling() {
+    if (this.logsPollInterval == null) return;
+    clearInterval(this.logsPollInterval);
+    this.logsPollInterval = null;
+  }
+
+  private scheduleLogsScroll(force = false) {
+    if (this.logsScrollFrame) cancelAnimationFrame(this.logsScrollFrame);
+    void this.updateComplete.then(() => {
+      this.logsScrollFrame = requestAnimationFrame(() => {
+        this.logsScrollFrame = null;
+        const container = this.querySelector(".log-stream") as HTMLElement | null;
+        if (!container) return;
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        const shouldStick = force || distanceFromBottom < 80;
+        if (!shouldStick) return;
+        container.scrollTop = container.scrollHeight;
+      });
+    });
+  }
+
+  handleChatScroll(event: Event) {
+    const container = event.currentTarget as HTMLElement | null;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    this.chatUserNearBottom = distanceFromBottom < 200;
+  }
+
+  handleLogsScroll(event: Event) {
+    const container = event.currentTarget as HTMLElement | null;
+    if (!container) return;
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    this.logsAtBottom = distanceFromBottom < 80;
+  }
+
+  exportLogs(lines: string[], label: string) {
+    if (lines.length === 0) return;
+    const blob = new Blob([`${lines.join("\n")}\n`], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    anchor.href = url;
+    anchor.download = `clawdbot-logs-${label}-${stamp}.log`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   resetToolStream() {
     this.toolStreamById.clear();
     this.toolStreamOrder = [];
     this.chatToolMessages = [];
+    this.toolOutputExpanded = new Set();
+    this.flushToolStreamSync();
   }
 
   resetChatScroll() {
     this.chatHasAutoScrolled = false;
+    this.chatUserNearBottom = true;
+  }
+
+  toggleToolOutput(id: string, expanded: boolean) {
+    const next = new Set(this.toolOutputExpanded);
+    if (expanded) {
+      next.add(id);
+    } else {
+      next.delete(id);
+    }
+    this.toolOutputExpanded = next;
   }
 
   private trimToolStream() {
@@ -523,6 +669,26 @@ export class ClawdbotApp extends LitElement {
     this.chatToolMessages = this.toolStreamOrder
       .map((id) => this.toolStreamById.get(id)?.message)
       .filter((msg): msg is Record<string, unknown> => Boolean(msg));
+  }
+
+  private scheduleToolStreamSync(force = false) {
+    if (force) {
+      this.flushToolStreamSync();
+      return;
+    }
+    if (this.toolStreamSyncTimer != null) return;
+    this.toolStreamSyncTimer = window.setTimeout(
+      () => this.flushToolStreamSync(),
+      TOOL_STREAM_THROTTLE_MS,
+    );
+  }
+
+  private flushToolStreamSync() {
+    if (this.toolStreamSyncTimer != null) {
+      clearTimeout(this.toolStreamSyncTimer);
+      this.toolStreamSyncTimer = null;
+    }
+    this.syncToolStreamMessages();
   }
 
   private buildToolStreamMessage(entry: ToolStreamEntry): Record<string, unknown> {
@@ -597,7 +763,7 @@ export class ClawdbotApp extends LitElement {
 
     entry.message = this.buildToolStreamMessage(entry);
     this.trimToolStream();
-    this.syncToolStreamMessages();
+    this.scheduleToolStreamSync(phase === "result");
   }
 
   private onEvent(evt: GatewayEventFrame) {
@@ -616,9 +782,13 @@ export class ClawdbotApp extends LitElement {
 
     if (evt.event === "chat") {
       const payload = evt.payload as ChatEventPayload | undefined;
+      if (payload?.sessionKey) {
+        this.setLastActiveSessionKey(payload.sessionKey);
+      }
       const state = handleChatEvent(this, payload);
       if (state === "final" || state === "error" || state === "aborted") {
         this.resetToolStream();
+        void this.flushChatQueue();
       }
       if (state === "final") void loadChatHistory(this);
       return;
@@ -652,23 +822,63 @@ export class ClawdbotApp extends LitElement {
   }
 
   applySettings(next: UiSettings) {
-    this.settings = next;
-    saveSettings(next);
+    const normalized = {
+      ...next,
+      lastActiveSessionKey:
+        next.lastActiveSessionKey?.trim() || next.sessionKey.trim() || "main",
+    };
+    this.settings = normalized;
+    saveSettings(normalized);
     if (next.theme !== this.theme) {
       this.theme = next.theme;
       this.applyResolvedTheme(resolveTheme(next.theme));
     }
+    this.applySessionKey = this.settings.lastActiveSessionKey;
+  }
+
+  private setLastActiveSessionKey(next: string) {
+    const trimmed = next.trim();
+    if (!trimmed) return;
+    if (this.settings.lastActiveSessionKey === trimmed) return;
+    this.applySettings({ ...this.settings, lastActiveSessionKey: trimmed });
   }
 
   private applySettingsFromUrl() {
     if (!window.location.search) return;
     const params = new URLSearchParams(window.location.search);
-    const token = params.get("token")?.trim();
-    if (!token) return;
-    if (!this.settings.token) {
-      this.applySettings({ ...this.settings, token });
+    const tokenRaw = params.get("token");
+    const passwordRaw = params.get("password");
+    const sessionRaw = params.get("session");
+    let shouldCleanUrl = false;
+
+    if (tokenRaw != null) {
+      const token = tokenRaw.trim();
+      if (token && !this.settings.token) {
+        this.applySettings({ ...this.settings, token });
+      }
+      params.delete("token");
+      shouldCleanUrl = true;
     }
-    params.delete("token");
+
+    if (passwordRaw != null) {
+      const password = passwordRaw.trim();
+      if (password) {
+        this.password = password;
+      }
+      params.delete("password");
+      shouldCleanUrl = true;
+    }
+
+    if (sessionRaw != null) {
+      const session = sessionRaw.trim();
+      if (session) {
+        this.sessionKey = session;
+      }
+      params.delete("session");
+      shouldCleanUrl = true;
+    }
+
+    if (!shouldCleanUrl) return;
     const url = new URL(window.location.href);
     url.search = params.toString();
     window.history.replaceState({}, "", url.toString());
@@ -677,6 +887,8 @@ export class ClawdbotApp extends LitElement {
   setTab(next: Tab) {
     if (this.tab !== next) this.tab = next;
     if (next === "chat") this.chatHasAutoScrolled = false;
+    if (next === "logs") this.startLogsPolling();
+    else this.stopLogsPolling();
     void this.refreshActiveTab();
     this.syncUrlWithTab(next, false);
   }
@@ -714,6 +926,11 @@ export class ClawdbotApp extends LitElement {
     if (this.tab === "debug") {
       await loadDebug(this);
       this.eventLog = this.eventLogBuffer;
+    }
+    if (this.tab === "logs") {
+      this.logsAtBottom = true;
+      await loadLogs(this, { reset: true });
+      this.scheduleLogsScroll(true);
     }
   }
 
@@ -788,6 +1005,8 @@ export class ClawdbotApp extends LitElement {
   private setTabFromRoute(next: Tab) {
     if (this.tab !== next) this.tab = next;
     if (next === "chat") this.chatHasAutoScrolled = false;
+    if (next === "logs") this.startLogsPolling();
+    else this.stopLogsPolling();
     if (this.connected) void this.refreshActiveTab();
   }
 
@@ -807,7 +1026,7 @@ export class ClawdbotApp extends LitElement {
 
   async loadOverview() {
     await Promise.all([
-      loadProviders(this, false),
+      loadChannels(this, false),
       loadPresence(this),
       loadSessions(this),
       loadCronStatus(this),
@@ -816,70 +1035,190 @@ export class ClawdbotApp extends LitElement {
   }
 
   private async loadConnections() {
-    await Promise.all([loadProviders(this, true), loadConfig(this)]);
+    await Promise.all([loadChannels(this, true), loadConfig(this)]);
   }
 
   async loadCron() {
     await Promise.all([loadCronStatus(this), loadCronJobs(this)]);
   }
-  async handleSendChat() {
+
+  private isChatBusy() {
+    return this.chatSending || Boolean(this.chatRunId);
+  }
+
+  private isChatStopCommand(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    const normalized = trimmed.toLowerCase();
+    if (normalized === "/stop") return true;
+    return (
+      normalized === "stop" ||
+      normalized === "esc" ||
+      normalized === "abort" ||
+      normalized === "wait" ||
+      normalized === "exit"
+    );
+  }
+
+  async handleAbortChat() {
     if (!this.connected) return;
+    this.chatMessage = "";
+    await abortChatRun(this);
+  }
+
+  private enqueueChatMessage(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.chatQueue = [
+      ...this.chatQueue,
+      {
+        id: generateUUID(),
+        text: trimmed,
+        createdAt: Date.now(),
+      },
+    ];
+  }
+
+  private async sendChatMessageNow(
+    message: string,
+    opts?: { previousDraft?: string; restoreDraft?: boolean },
+  ) {
     this.resetToolStream();
-    const ok = await sendChat(this);
-    if (ok && this.chatRunId) {
-      // chat.send returned (run finished), but we missed the chat final event.
-      this.chatRunId = null;
-      this.chatStream = null;
-      this.chatStreamStartedAt = null;
-      this.resetToolStream();
-      void loadChatHistory(this);
+    const ok = await sendChatMessage(this, message);
+    if (!ok && opts?.previousDraft != null) {
+      this.chatMessage = opts.previousDraft;
+    }
+    if (ok) {
+      this.setLastActiveSessionKey(this.sessionKey);
+    }
+    if (ok && opts?.restoreDraft && opts.previousDraft?.trim()) {
+      this.chatMessage = opts.previousDraft;
     }
     this.scheduleChatScroll();
+    if (ok && !this.chatRunId) {
+      void this.flushChatQueue();
+    }
+    return ok;
+  }
+
+  private async flushChatQueue() {
+    if (!this.connected || this.isChatBusy()) return;
+    const [next, ...rest] = this.chatQueue;
+    if (!next) return;
+    this.chatQueue = rest;
+    const ok = await this.sendChatMessageNow(next.text);
+    if (!ok) {
+      this.chatQueue = [next, ...this.chatQueue];
+    }
+  }
+
+  removeQueuedMessage(id: string) {
+    this.chatQueue = this.chatQueue.filter((item) => item.id !== id);
+  }
+
+  async handleSendChat(
+    messageOverride?: string,
+    opts?: { restoreDraft?: boolean },
+  ) {
+    if (!this.connected) return;
+    const previousDraft = this.chatMessage;
+    const message = (messageOverride ?? this.chatMessage).trim();
+    if (!message) return;
+
+    if (this.isChatStopCommand(message)) {
+      await this.handleAbortChat();
+      return;
+    }
+
+    if (messageOverride == null) {
+      this.chatMessage = "";
+    }
+
+    if (this.isChatBusy()) {
+      this.enqueueChatMessage(message);
+      return;
+    }
+
+    await this.sendChatMessageNow(message, {
+      previousDraft: messageOverride == null ? previousDraft : undefined,
+      restoreDraft: Boolean(messageOverride && opts?.restoreDraft),
+    });
   }
 
   async handleWhatsAppStart(force: boolean) {
     await startWhatsAppLogin(this, force);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleWhatsAppWait() {
     await waitWhatsAppLogin(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleWhatsAppLogout() {
     await logoutWhatsApp(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleTelegramSave() {
     await saveTelegramConfig(this);
     await loadConfig(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleDiscordSave() {
     await saveDiscordConfig(this);
     await loadConfig(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleSlackSave() {
     await saveSlackConfig(this);
     await loadConfig(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleSignalSave() {
     await saveSignalConfig(this);
     await loadConfig(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
   }
 
   async handleIMessageSave() {
     await saveIMessageConfig(this);
     await loadConfig(this);
-    await loadProviders(this, true);
+    await loadChannels(this, true);
+  }
+
+  // Sidebar handlers for tool output viewing
+  handleOpenSidebar(content: string) {
+    if (this.sidebarCloseTimer != null) {
+      window.clearTimeout(this.sidebarCloseTimer);
+      this.sidebarCloseTimer = null;
+    }
+    this.sidebarContent = content;
+    this.sidebarError = null;
+    this.sidebarOpen = true;
+  }
+
+  handleCloseSidebar() {
+    this.sidebarOpen = false;
+    // Clear content after transition
+    if (this.sidebarCloseTimer != null) {
+      window.clearTimeout(this.sidebarCloseTimer);
+    }
+    this.sidebarCloseTimer = window.setTimeout(() => {
+      if (this.sidebarOpen) return;
+      this.sidebarContent = null;
+      this.sidebarError = null;
+      this.sidebarCloseTimer = null;
+    }, 200);
+  }
+
+  handleSplitRatioChange(ratio: number) {
+    const newRatio = Math.max(0.4, Math.min(0.7, ratio));
+    this.splitRatio = newRatio;
+    this.applySettings({ ...this.settings, splitRatio: newRatio });
   }
 
   render() {

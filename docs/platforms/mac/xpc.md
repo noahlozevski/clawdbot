@@ -3,7 +3,7 @@ summary: "macOS IPC architecture for Clawdbot app, gateway node bridge, and Peek
 read_when:
   - Editing IPC contracts or menu bar app IPC
 ---
-# Clawdbot macOS IPC architecture (Dec 2025)
+# Clawdbot macOS IPC architecture
 
 **Current model:** there is **no local control socket** and no `clawdbot-mac` CLI. All agent actions go through the Gateway WebSocket and `node.invoke`. UI automation still uses PeekabooBridge.
 
@@ -20,14 +20,14 @@ read_when:
 ### PeekabooBridge (UI automation)
 - UI automation uses a separate UNIX socket named `bridge.sock` and the PeekabooBridge JSON protocol.
 - Host preference order (client-side): Peekaboo.app → Claude.app → Clawdbot.app → local execution.
-- Security: bridge hosts require TeamID `Y5PE65HELJ`; DEBUG-only same-UID escape hatch is guarded by `PEEKABOO_ALLOW_UNSIGNED_SOCKET_CLIENTS=1` (Peekaboo convention).
-- See: [`docs/mac/peekaboo.md`](/platforms/mac/peekaboo) for the Clawdbot plan and naming.
+- Security: bridge hosts require an allowed TeamID; DEBUG-only same-UID escape hatch is guarded by `PEEKABOO_ALLOW_UNSIGNED_SOCKET_CLIENTS=1` (Peekaboo convention).
+- See: [PeekabooBridge usage](/platforms/mac/peekaboo) for details.
 
-### Mach/XPC (future direction)
-- Still optional for internal app services, but **not required** for automation now that node.invoke is the surface.
+### Mach/XPC
+- Not required for automation; `node.invoke` + PeekabooBridge cover current needs.
 
 ## Operational flows
-- Restart/rebuild: `SIGN_IDENTITY="Apple Development: Peter Steinberger (2ZAC4GM7GD)" scripts/restart-mac.sh`
+- Restart/rebuild: `SIGN_IDENTITY="Apple Development: <Developer Name> (<TEAMID>)" scripts/restart-mac.sh`
   - Kills existing instances
   - Swift build + package
   - Writes/bootstraps/kickstarts the LaunchAgent
@@ -37,4 +37,4 @@ read_when:
 - Prefer requiring a TeamID match for all privileged surfaces.
 - PeekabooBridge: `PEEKABOO_ALLOW_UNSIGNED_SOCKET_CLIENTS=1` (DEBUG-only) may allow same-UID callers for local development.
 - All communication remains local-only; no network sockets are exposed.
-- TCC prompts originate only from the GUI app bundle; run [`scripts/package-mac-app.sh`](https://github.com/clawdbot/clawdbot/blob/main/scripts/package-mac-app.sh) so the signed bundle ID stays stable.
+- TCC prompts originate only from the GUI app bundle; keep the signed bundle ID stable across rebuilds.

@@ -8,7 +8,7 @@ read_when:
 
 ## First run (recommended)
 
-Clawdbot uses a dedicated workspace directory for the agent. Default: `~/clawd` (configurable via `agent.workspace`).
+Clawdbot uses a dedicated workspace directory for the agent. Default: `~/clawd` (configurable via `agents.defaults.workspace`).
 
 1) Create the workspace (if it doesn’t already exist):
 
@@ -30,13 +30,11 @@ cp docs/reference/templates/TOOLS.md ~/clawd/TOOLS.md
 cp docs/reference/AGENTS.default.md ~/clawd/AGENTS.md
 ```
 
-4) Optional: choose a different workspace by setting `agent.workspace` (supports `~`):
+4) Optional: choose a different workspace by setting `agents.defaults.workspace` (supports `~`):
 
 ```json5
 {
-  agent: {
-    workspace: "~/clawd"
-  }
+  agents: { defaults: { workspace: "~/clawd" } }
 }
 ```
 
@@ -83,18 +81,17 @@ git commit -m "Add Clawd workspace"
 ## What Clawdbot Does
 - Runs WhatsApp gateway + Pi coding agent so the assistant can read/write chats, fetch context, and run skills via the host Mac.
 - macOS app manages permissions (screen recording, notifications, microphone) and exposes the `clawdbot` CLI via its bundled binary.
-- Direct chats collapse into the agent's `main` session by default; groups stay isolated as `agent:<agentId>:<provider>:group:<id>` (rooms/channels: `agent:<agentId>:<provider>:channel:<id>`); heartbeats keep background tasks alive.
+- Direct chats collapse into the agent's `main` session by default; groups stay isolated as `agent:<agentId>:<channel>:group:<id>` (rooms/channels: `agent:<agentId>:<channel>:channel:<id>`); heartbeats keep background tasks alive.
 
 ## Core Skills (enable in Settings → Skills)
 - **mcporter** — Tool server runtime/CLI for managing external skill backends.
 - **Peekaboo** — Fast macOS screenshots with optional AI vision analysis.
 - **camsnap** — Capture frames, clips, or motion alerts from RTSP/ONVIF security cams.
 - **oracle** — OpenAI-ready agent CLI with session replay and browser control.
-- **qmd** — Hybrid markdown search (BM25 + vectors + rerank) with a local server for agents.
 - **eightctl** — Control your sleep, from the terminal.
 - **imsg** — Send, read, stream iMessage & SMS.
 - **wacli** — WhatsApp CLI: sync, search, send.
-- **discord** — Discord actions: react, stickers, polls.
+- **discord** — Discord actions: react, stickers, polls. Use `user:<id>` or `channel:<id>` targets (bare numeric ids are ambiguous).
 - **gog** — Google Suite CLI: Gmail, Calendar, Drive, Contacts.
 - **spotify-player** — Terminal Spotify client to search/queue/control playback.
 - **sag** — ElevenLabs speech with mac-style say UX; streams to speakers by default.

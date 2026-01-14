@@ -1,255 +1,197 @@
 ---
-summary: "Spec: integrated browser control server + action commands"
+summary: "Integrated browser control server + action commands"
 read_when:
   - Adding agent-controlled browser automation
   - Debugging why clawd is interfering with your own Chrome
   - Implementing browser settings + lifecycle in the macOS app
 ---
 
-# Browser (integrated) — clawd-managed Chrome
+# Browser (clawd-managed)
 
-Status: draft spec · Date: 2025-12-20
+Clawdbot can run a **dedicated Chrome/Chromium profile** that the agent controls.
+It is isolated from your personal browser and is managed through a small local
+control server.
 
-Goal: give the **clawd** persona its own browser that is:
-- Visually distinct (lobster-orange, profile labeled "clawd").
-- Fully agent-manageable (start/stop, list tabs, focus/close tabs, open URLs, screenshot).
-- Non-interfering with the user's own browser (separate profile + dedicated ports).
+Beginner view:
+- Think of it as a **separate, agent-only browser**.
+- It does **not** touch your personal Chrome profile.
+- The agent can **open tabs, read pages, click, and type** in a safe lane.
 
-This doc covers the macOS app/gateway side. It intentionally does not mandate
-Playwright vs Puppeteer; the key is the **contract** and the **separation guarantees**.
+## What you get
 
-## User-facing settings
+- A separate browser profile named **clawd** (orange accent by default).
+- Deterministic tab control (list/open/focus/close).
+- Agent actions (click/type/drag/select), snapshots, screenshots, PDFs.
+- Optional multi-profile support (`clawd`, `work`, `remote`, ...).
 
-Add a dedicated settings section (preferably under **Skills** or its own "Browser" tab):
+This browser is **not** your daily driver. It is a safe, isolated surface for
+agent automation and verification.
 
-- **Enable clawd browser** (`default: on`)
-  - When off: no browser is launched, and browser tools return "disabled".
-- **Browser control URL** (`default: http://127.0.0.1:18791`)
-  - Interpreted as the base URL of the local/remote browser-control server.
-  - If the URL host is not loopback, Clawdbot must **not** attempt to launch a local
-    browser; it only connects.
-- **CDP URL** (`default: controlUrl + 1`)
-  - Base URL for Chrome DevTools Protocol (e.g. `http://127.0.0.1:18792`).
-  - Set this to a non-loopback host to attach the local control server to a remote
-    Chrome/Chromium CDP endpoint (SSH/Tailscale tunnel recommended).
-  - If the CDP URL host is non-loopback, clawd does **not** auto-launch a local browser.
-  - If you tunnel a remote CDP to `localhost`, set **Attach to existing only** to
-    avoid accidentally launching a local browser.
-- **Accent color** (`default: #FF4500`, "lobster-orange")
-  - Used to theme the clawd browser profile (best-effort) and to tint UI indicators
-    in Clawdbot.
+## Quick start
 
-Optional (advanced, can be hidden behind Debug initially):
-- **Use headless browser** (`default: off`)
-- **Attach to existing only** (`default: off`) — if on, never launch; only connect if
-  already running.
-- **Browser executable path** (override, optional)
-- **No sandbox** (`default: off`) — adds `--no-sandbox` + `--disable-setuid-sandbox`
+```bash
+clawdbot browser status
+clawdbot browser start
+clawdbot browser open https://example.com
+clawdbot browser snapshot
+```
 
-### Port convention
+If you get “Browser disabled”, enable it in config (see below) and restart the
+Gateway.
 
-Clawdbot already uses:
-- Gateway WebSocket: `18789`
-- Bridge (voice/node): `18790`
+## Configuration
 
-For the clawd browser-control server, use "family" ports:
-- Browser control HTTP API: `18791` (bridge + 1)
-- Browser CDP/debugging port: `18792` (control + 1)
-- Canvas host HTTP: `18793` by default, mounted at `/__clawdbot__/canvas/`
+Browser settings live in `~/.clawdbot/clawdbot.json`.
 
-The user usually only configures the **control URL** (port `18791`). CDP is an
-internal detail.
-
-## Browser isolation guarantees (non-negotiable)
-
-1) **Dedicated user data dir**
-   - Never attach to or reuse the user's default Chrome profile.
-   - Store clawd browser state under an app-owned directory, e.g.:
-     - `~/Library/Application Support/Clawdbot/browser/clawd/` (mac app)
-     - or `~/.clawdbot/browser/clawd/` (gateway/CLI)
-
-2) **Dedicated ports**
-   - Never use `9222` (reserved for ad-hoc dev workflows; avoids colliding with
-     `agent-tools/browser-tools`).
-   - Default ports are `18791/18792` unless overridden.
-
-3) **Named tab/page management**
-   - The agent must be able to enumerate and target tabs deterministically (by
-     stable `targetId` or equivalent), not "last tab".
-
-## Browser selection (macOS + Linux)
-
-On startup (when enabled + local URL), Clawdbot chooses the browser executable
-in this order:
-1) **Google Chrome Canary** (if installed)
-2) **Chromium** (if installed)
-3) **Google Chrome** (fallback)
-
-Linux:
-- Looks for `google-chrome` / `chromium` in common system paths.
-- Use **Browser executable path** to force a specific binary.
-
-Implementation detail:
-- macOS: detection is by existence of the `.app` bundle under `/Applications`
-  (and optionally `~/Applications`), then using the resolved executable path.
-- Linux: common `/usr/bin`/`/snap/bin` paths.
-
-Rationale:
-- Canary/Chromium are easy to visually distinguish from the user's daily driver.
-- Chrome fallback ensures the feature works on a stock machine.
-
-## Visual differentiation ("lobster-orange")
-
-The clawd browser should be obviously different at a glance:
-- Profile name: **clawd**
-- Profile color: **#FF4500**
-
-Preferred behavior:
-- Seed/patch the profile's preferences on first launch so the color + name persist.
-
-Fallback behavior:
-- If preferences patching is not reliable, open with the dedicated profile and let
-  the user set the profile color/name once via Chrome UI; it must persist because
-  the `userDataDir` is persistent.
-
-## Control server contract (vNext)
-
-Expose a small local HTTP API (and/or gateway RPC surface) so the agent can manage
-state without touching the user's Chrome.
-
-Basics:
-- `GET /` status payload (enabled/running/pid/cdpPort/etc)
-- `POST /start` start browser
-- `POST /stop` stop browser
-- `GET /tabs` list tabs
-- `POST /tabs/open` open a new tab
-- `POST /tabs/focus` focus a tab by id/prefix
-- `DELETE /tabs/:targetId` close a tab by id/prefix
-
-Inspection:
-- `POST /screenshot` `{ targetId?, fullPage?, ref?, element?, type? }`
-- `GET /snapshot` `?format=aria|ai&targetId?&limit?`
-- `GET /console` `?level?&targetId?`
-- `POST /pdf` `{ targetId? }`
-
-Actions:
-- `POST /navigate`
-- `POST /act` `{ kind, targetId?, ... }` where `kind` is one of:
-  - `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `wait`, `resize`, `close`, `evaluate`
-
-Hooks (arming):
-- `POST /hooks/file-chooser` `{ targetId?, paths, timeoutMs? }`
-- `POST /hooks/dialog` `{ targetId?, accept, promptText?, timeoutMs? }`
-
-### "Is it open or closed?"
-
-"Open" means:
-- the control server is reachable at the configured URL **and**
-- it reports a live browser connection.
-
-"Closed" means:
-- control server not reachable, or server reports no browser.
-
-Clawdbot should treat "open/closed" as a health check (fast path), not by scanning
-global Chrome processes (avoid false positives).
-
-## Multi-profile support
-
-Clawdbot supports multiple named browser profiles, each with:
-- Dedicated CDP port (auto-allocated from 18800-18899) **or** a per-profile CDP URL
-- Persistent user data directory (`~/.clawdbot/browser/<name>/user-data/`)
-- Unique color for visual distinction
-
-### Configuration
-
-```json
+```json5
 {
-  "browser": {
-    "enabled": true,
-    "defaultProfile": "clawd",
-    "profiles": {
-      "clawd": { "cdpPort": 18800, "color": "#FF4500" },
-      "work": { "cdpPort": 18801, "color": "#0066CC" },
-      "remote": { "cdpUrl": "http://10.0.0.42:9222", "color": "#00AA00" }
+  browser: {
+    enabled: true,                    // default: true
+    controlUrl: "http://127.0.0.1:18791",
+    cdpUrl: "http://127.0.0.1:18792", // defaults to controlUrl + 1
+    defaultProfile: "clawd",
+    color: "#FF4500",
+    headless: false,
+    noSandbox: false,
+    attachOnly: false,
+    executablePath: "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    profiles: {
+      clawd: { cdpPort: 18800, color: "#FF4500" },
+      work: { cdpPort: 18801, color: "#0066CC" },
+      remote: { cdpUrl: "http://10.0.0.42:9222", color: "#00AA00" }
     }
   }
 }
 ```
 
-### Profile actions
+Notes:
+- `controlUrl` defaults to `http://127.0.0.1:18791`.
+- If you override the Gateway port (`gateway.port` or `CLAWDBOT_GATEWAY_PORT`),
+  the default browser ports shift to stay in the same “family” (control = gateway + 2).
+- `cdpUrl` defaults to `controlUrl + 1` when unset.
+- `attachOnly: true` means “never launch Chrome; only attach if it is already running.”
+- `color` + per-profile `color` tint the browser UI so you can see which profile is active.
 
-- `GET /profiles` — list all profiles with status
-- `POST /profiles/create` `{ name, color?, cdpUrl? }` — create new profile (auto-allocates port if no `cdpUrl`)
-- `DELETE /profiles/:name` — delete profile (stops browser + removes user data for local profiles)
-- `POST /reset-profile?profile=<name>` — kill orphan process on profile's port (local profiles only)
+## Local vs remote control
 
-### Profile parameter
+- **Local control (default):** `controlUrl` is loopback (`127.0.0.1`/`localhost`).
+  The Gateway starts the control server and can launch Chrome.
+- **Remote control:** `controlUrl` is non-loopback. The Gateway **does not** start
+  a local server; it assumes you are pointing at an existing server elsewhere.
+- **Remote CDP:** set `browser.profiles.<name>.cdpUrl` (or `browser.cdpUrl`) to
+  attach to a remote Chrome. In this case, Clawdbot will not launch a local browser.
 
-All existing endpoints accept optional `?profile=<name>` query parameter:
-- `GET /?profile=work` — status for work profile
-- `POST /start?profile=work` — start work profile browser
-- `GET /tabs?profile=work` — list tabs for work profile
-- `POST /tabs/open?profile=work` — open tab in work profile
-- etc.
+## Remote browser (control server)
 
-When `profile` is omitted, uses `browser.defaultProfile` (defaults to "clawd").
+You can run the **browser control server** on another machine and point your
+Gateway at it with a remote `controlUrl`. This lets the agent drive a browser
+outside the host (lab box, VM, remote desktop, etc.).
 
-### Agent browser tool
+Key points:
+- The **control server** speaks to Chrome/Chromium via **CDP**.
+- The **Gateway** only needs the HTTP control URL.
+- Profiles are resolved on the **control server** side.
 
-The `browser` tool accepts an optional `profile` parameter for all actions:
-
-```json
+Example:
+```json5
 {
-  "action": "open",
-  "targetUrl": "https://example.com",
-  "profile": "work"
+  browser: {
+    enabled: true,
+    controlUrl: "http://10.0.0.42:18791",
+    defaultProfile: "work"
+  }
 }
 ```
 
-This routes the operation to the specified profile's browser instance. Omitting
-`profile` uses the default profile.
+Use `profiles.<name>.cdpUrl` for **remote CDP** if you want the Gateway to talk
+directly to a Chrome instance without a remote control server.
 
-### Profile naming rules
+## Profiles (multi-browser)
 
-- Lowercase alphanumeric characters and hyphens only
-- Must start with a letter or number (not a hyphen)
-- Maximum 64 characters
-- Examples: `clawd`, `work`, `my-project-1`
+Clawdbot supports multiple named profiles. Each profile has its own:
+- user data directory
+- CDP port (local) or CDP URL (remote)
+- accent color
 
-### Port allocation
+Defaults:
+- The `clawd` profile is auto-created if missing.
+- Local CDP ports allocate from **18800–18899** by default.
+- Deleting a profile moves its local data directory to Trash.
 
-Ports are allocated from range 18800-18899 (~100 profiles max). This is far more
-than practical use — memory and CPU exhaustion occur well before port exhaustion.
-Ports are allocated once at profile creation and persisted permanently.
-Remote profiles are attach-only and do **not** use the local port range.
-## Interaction with the agent (clawd)
+All control endpoints accept `?profile=<name>`; the CLI uses `--browser-profile`.
 
-The agent should use browser tools only when:
-- enabled in settings
-- control URL is configured
+## Isolation guarantees
 
-If disabled, tools must fail fast with a friendly error ("Browser disabled in settings").
+- **Dedicated user data dir**: never touches your personal Chrome profile.
+- **Dedicated ports**: avoids `9222` to prevent collisions with dev workflows.
+- **Deterministic tab control**: target tabs by `targetId`, not “last tab”.
 
-The agent should not assume tabs are ephemeral. It should:
-- call `browser.tabs.list` to discover existing tabs first
-- reuse an existing tab when appropriate (e.g. a persistent "main" tab)
-- avoid opening duplicate tabs unless asked
+## Browser selection
 
-## CLI quick reference (one example each)
+When launching locally, Clawdbot picks the first available:
+1. Chrome Canary
+2. Chromium
+3. Chrome
 
-All commands accept `--browser-profile <name>` to target a specific profile (default: `clawd`).
+You can override with `browser.executablePath`.
 
-Profile management:
-- `clawdbot browser profiles`
-- `clawdbot browser create-profile --name work`
-- `clawdbot browser create-profile --name remote --cdp-url http://10.0.0.42:9222`
-- `clawdbot browser delete-profile --name work`
+Platforms:
+- macOS: checks `/Applications` and `~/Applications`.
+- Linux: looks for `google-chrome`, `chromium`, etc.
+- Windows: checks common install locations.
+
+## Control API (optional)
+
+If you want to integrate directly, the browser control server exposes a small
+HTTP API:
+
+- Status/start/stop: `GET /`, `POST /start`, `POST /stop`
+- Tabs: `GET /tabs`, `POST /tabs/open`, `POST /tabs/focus`, `DELETE /tabs/:targetId`
+- Snapshot/screenshot: `GET /snapshot`, `POST /screenshot`
+- Actions: `POST /navigate`, `POST /act`
+- Hooks: `POST /hooks/file-chooser`, `POST /hooks/dialog`
+- Downloads: `POST /download`, `POST /wait/download`
+- Debugging: `GET /console`, `POST /pdf`
+- Debugging: `GET /errors`, `GET /requests`, `POST /trace/start`, `POST /trace/stop`, `POST /highlight`
+- Network: `POST /response/body`
+- State: `GET /cookies`, `POST /cookies/set`, `POST /cookies/clear`
+- State: `GET /storage/:kind`, `POST /storage/:kind/set`, `POST /storage/:kind/clear`
+- Settings: `POST /set/offline`, `POST /set/headers`, `POST /set/credentials`, `POST /set/geolocation`, `POST /set/media`, `POST /set/timezone`, `POST /set/locale`, `POST /set/device`
+
+All endpoints accept `?profile=<name>`.
+
+### Playwright requirement
+
+Some features (navigate/act/AI snapshot/role snapshot, element screenshots, PDF) require
+Playwright. If Playwright isn’t installed, those endpoints return a clear 501
+error. ARIA snapshots and basic screenshots still work.
+
+## How it works (internal)
+
+High-level flow:
+- A small **control server** accepts HTTP requests.
+- It connects to Chrome/Chromium via **CDP**.
+- For advanced actions (click/type/snapshot/PDF), it uses **Playwright** on top
+  of CDP.
+- When Playwright is missing, only non-Playwright operations are available.
+
+This design keeps the agent on a stable, deterministic interface while letting
+you swap local/remote browsers and profiles.
+
+## CLI quick reference
+
+All commands accept `--browser-profile <name>` to target a specific profile.
+All commands also accept `--json` for machine-readable output (stable payloads).
+
 Basics:
 - `clawdbot browser status`
 - `clawdbot browser start`
 - `clawdbot browser stop`
-- `clawdbot browser reset-profile`
 - `clawdbot browser tabs`
+- `clawdbot browser tab`
+- `clawdbot browser tab new`
+- `clawdbot browser tab select 2`
+- `clawdbot browser tab close 2`
 - `clawdbot browser open https://example.com`
 - `clawdbot browser focus abcd1234`
 - `clawdbot browser close abcd1234`
@@ -258,52 +200,187 @@ Inspection:
 - `clawdbot browser screenshot`
 - `clawdbot browser screenshot --full-page`
 - `clawdbot browser screenshot --ref 12`
+- `clawdbot browser screenshot --ref e12`
 - `clawdbot browser snapshot`
 - `clawdbot browser snapshot --format aria --limit 200`
+- `clawdbot browser snapshot --interactive --compact --depth 6`
+- `clawdbot browser snapshot --selector "#main" --interactive`
+- `clawdbot browser snapshot --frame "iframe#main" --interactive`
+- `clawdbot browser console --level error`
+- `clawdbot browser errors --clear`
+- `clawdbot browser requests --filter api --clear`
+- `clawdbot browser pdf`
+- `clawdbot browser responsebody "**/api" --max-chars 5000`
 
 Actions:
 - `clawdbot browser navigate https://example.com`
 - `clawdbot browser resize 1280 720`
 - `clawdbot browser click 12 --double`
+- `clawdbot browser click e12 --double`
 - `clawdbot browser type 23 "hello" --submit`
 - `clawdbot browser press Enter`
 - `clawdbot browser hover 44`
+- `clawdbot browser scrollintoview e12`
 - `clawdbot browser drag 10 11`
 - `clawdbot browser select 9 OptionA OptionB`
+- `clawdbot browser download e12 /tmp/report.pdf`
+- `clawdbot browser waitfordownload /tmp/report.pdf`
 - `clawdbot browser upload /tmp/file.pdf`
-- `clawdbot browser fill --fields '[{\"ref\":\"1\",\"value\":\"Ada\"}]'`
+- `clawdbot browser fill --fields '[{"ref":"1","type":"text","value":"Ada"}]'`
 - `clawdbot browser dialog --accept`
 - `clawdbot browser wait --text "Done"`
+- `clawdbot browser wait "#main" --url "**/dash" --load networkidle --fn "window.ready===true"`
 - `clawdbot browser evaluate --fn '(el) => el.textContent' --ref 7`
-- `clawdbot browser evaluate --fn "document.querySelector('.my-class').click()"`
-- `clawdbot browser console --level error`
-- `clawdbot browser pdf`
+- `clawdbot browser highlight e12`
+- `clawdbot browser trace start`
+- `clawdbot browser trace stop`
+
+State:
+- `clawdbot browser cookies`
+- `clawdbot browser cookies set session abc123 --url "https://example.com"`
+- `clawdbot browser cookies clear`
+- `clawdbot browser storage local get`
+- `clawdbot browser storage local set theme dark`
+- `clawdbot browser storage session clear`
+- `clawdbot browser set offline on`
+- `clawdbot browser set headers --json '{"X-Debug":"1"}'`
+- `clawdbot browser set credentials user pass`
+- `clawdbot browser set credentials --clear`
+- `clawdbot browser set geo 37.7749 -122.4194 --origin "https://example.com"`
+- `clawdbot browser set geo --clear`
+- `clawdbot browser set media dark`
+- `clawdbot browser set timezone America/New_York`
+- `clawdbot browser set locale en-US`
+- `clawdbot browser set device "iPhone 14"`
 
 Notes:
-- `upload` and `dialog` are **arming** calls; run them before the click/press that triggers the chooser/dialog.
-- `upload` can take a `ref` to auto-click after arming (useful for single-step file uploads).
-- `upload` can also take `inputRef` (aria ref) or `element` (CSS selector) to set `<input type="file">` directly without waiting for a file chooser.
-- The arm default timeout is **2 minutes** (clamped to max 2 minutes); pass `timeoutMs` if you need shorter.
-- `snapshot` defaults to `ai`; `aria` returns an accessibility tree for debugging.
-- `click`/`type` require `ref` from `snapshot --format ai`; use `evaluate` for rare CSS selector one-offs.
-- Avoid `wait` by default; use it only in exceptional cases when there is no reliable UI state to wait on.
+- `upload` and `dialog` are **arming** calls; run them before the click/press
+  that triggers the chooser/dialog.
+- `upload` can also set file inputs directly via `--input-ref` or `--element`.
+- `snapshot`:
+  - `--format ai` (default when Playwright is installed): returns an AI snapshot with numeric refs (`aria-ref="<n>"`).
+  - `--format aria`: returns the accessibility tree (no refs; inspection only).
+  - Role snapshot options (`--interactive`, `--compact`, `--depth`, `--selector`) force a role-based snapshot with refs like `ref=e12`.
+  - `--frame "<iframe selector>"` scopes role snapshots to an iframe (pairs with role refs like `e12`).
+  - `--interactive` outputs a flat, easy-to-pick list of interactive elements (best for driving actions).
+- `click`/`type`/etc require a `ref` from `snapshot` (either numeric `12` or role ref `e12`).
+  CSS selectors are intentionally not supported for actions.
 
-## Security & privacy notes
+## Snapshots and refs
 
-- The clawd browser profile is app-owned; it may contain logged-in sessions.
-  Treat it as sensitive data.
-- The control server must bind to loopback only by default (`127.0.0.1`) unless the
-  user explicitly configures a non-loopback URL.
-- Never reuse or copy the user's default Chrome profile.
-- Remote CDP endpoints should be tunneled or protected; CDP is highly privileged.
+Clawdbot supports two “snapshot” styles:
 
-## Non-goals (for the first cut)
+- **AI snapshot (numeric refs)**: `clawdbot browser snapshot` (default; `--format ai`)
+  - Output: a text snapshot that includes numeric refs.
+  - Actions: `clawdbot browser click 12`, `clawdbot browser type 23 "hello"`.
+  - Internally, the ref is resolved via Playwright’s `aria-ref`.
 
-- Cross-device "sync" of tabs between Mac and Pi.
-- Sharing the user's logged-in Chrome sessions automatically.
-- General-purpose web scraping; this is primarily for "close-the-loop" verification
-  and interaction.
+- **Role snapshot (role refs like `e12`)**: `clawdbot browser snapshot --interactive` (or `--compact`, `--depth`, `--selector`, `--frame`)
+  - Output: a role-based list/tree with `[ref=e12]` (and optional `[nth=1]`).
+  - Actions: `clawdbot browser click e12`, `clawdbot browser highlight e12`.
+  - Internally, the ref is resolved via `getByRole(...)` (plus `nth()` for duplicates).
+
+Ref behavior:
+- Refs are **not stable across navigations**; if something fails, re-run `snapshot` and use a fresh ref.
+- If the role snapshot was taken with `--frame`, role refs are scoped to that iframe until the next role snapshot.
+
+## Wait power-ups
+
+You can wait on more than just time/text:
+
+- Wait for URL (globs supported by Playwright):
+  - `clawdbot browser wait --url "**/dash"`
+- Wait for load state:
+  - `clawdbot browser wait --load networkidle`
+- Wait for a JS predicate:
+  - `clawdbot browser wait --fn "window.ready===true"`
+- Wait for a selector to become visible:
+  - `clawdbot browser wait "#main"`
+
+These can be combined:
+
+```bash
+clawdbot browser wait "#main" \
+  --url "**/dash" \
+  --load networkidle \
+  --fn "window.ready===true" \
+  --timeout-ms 15000
+```
+
+## Debug workflows
+
+When an action fails (e.g. “not visible”, “strict mode violation”, “covered”):
+
+1. `clawdbot browser snapshot --interactive`
+2. Use `click <ref>` / `type <ref>` (prefer role refs in interactive mode)
+3. If it still fails: `clawdbot browser highlight <ref>` to see what Playwright is targeting
+4. If the page behaves oddly:
+   - `clawdbot browser errors --clear`
+   - `clawdbot browser requests --filter api --clear`
+5. For deep debugging: record a trace:
+   - `clawdbot browser trace start`
+   - reproduce the issue
+   - `clawdbot browser trace stop` (prints `TRACE:<path>`)
+
+## JSON output
+
+`--json` is for scripting and structured tooling.
+
+Examples:
+
+```bash
+clawdbot browser status --json
+clawdbot browser snapshot --interactive --json
+clawdbot browser requests --filter api --json
+clawdbot browser cookies --json
+```
+
+Role snapshots in JSON include `refs` plus a small `stats` block (lines/chars/refs/interactive) so tools can reason about payload size and density.
+
+## State and environment knobs
+
+These are useful for “make the site behave like X” workflows:
+
+- Cookies: `cookies`, `cookies set`, `cookies clear`
+- Storage: `storage local|session get|set|clear`
+- Offline: `set offline on|off`
+- Headers: `set headers --json '{"X-Debug":"1"}'` (or `--clear`)
+- HTTP basic auth: `set credentials user pass` (or `--clear`)
+- Geolocation: `set geo <lat> <lon> --origin "https://example.com"` (or `--clear`)
+- Media: `set media dark|light|no-preference|none`
+- Timezone / locale: `set timezone ...`, `set locale ...`
+- Device / viewport:
+  - `set device "iPhone 14"` (Playwright device presets)
+  - `set viewport 1280 720`
+
+## Security & privacy
+
+- The clawd browser profile may contain logged-in sessions; treat it as sensitive.
+- For logins and anti-bot notes (X/Twitter, etc.), see [Browser login + X/Twitter posting](/tools/browser-login).
+- Keep control URLs loopback-only unless you intentionally expose the server.
+- Remote CDP endpoints are powerful; tunnel and protect them.
 
 ## Troubleshooting
 
-For Linux-specific issues (especially Ubuntu with snap Chromium), see [browser-linux-troubleshooting](/tools/browser-linux-troubleshooting).
+For Linux-specific issues (especially snap Chromium), see
+[Browser troubleshooting](/tools/browser-linux-troubleshooting).
+
+## Agent tools + how control works
+
+The agent gets **one tool** for browser automation:
+- `browser` — status/start/stop/tabs/open/focus/close/snapshot/screenshot/navigate/act
+
+How it maps:
+- `browser snapshot` returns a stable UI tree (AI or ARIA).
+- `browser act` uses the snapshot `ref` IDs to click/type/drag/select.
+- `browser screenshot` captures pixels (full page or element).
+- `browser` accepts:
+  - `profile` to choose a named browser profile (host or remote control server).
+  - `target` (`sandbox` | `host` | `custom`) to select where the browser lives.
+  - `controlUrl` sets `target: "custom"` implicitly (remote control server).
+  - In sandboxed sessions, `target: "host"` requires `agents.defaults.sandbox.browser.allowHostControl=true`.
+  - If `target` is omitted: sandboxed sessions default to `sandbox`, non-sandbox sessions default to `host`.
+  - Sandbox allowlists can restrict `target: "custom"` to specific URLs/hosts/ports.
+  - Defaults: allowlists unset (no restriction), and sandbox host control is disabled.
+
+This keeps the agent deterministic and avoids brittle selectors.

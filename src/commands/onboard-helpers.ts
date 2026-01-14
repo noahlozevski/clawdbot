@@ -11,33 +11,43 @@ import {
 } from "../agents/workspace.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { CONFIG_PATH_CLAWDBOT } from "../config/config.js";
-import { resolveSessionTranscriptsDir } from "../config/sessions.js";
+import { resolveSessionTranscriptsDirForAgent } from "../config/sessions.js";
 import { callGateway } from "../gateway/call.js";
 import { normalizeControlUiBasePath } from "../gateway/control-ui.js";
+import { isSafeExecutableValue } from "../infra/exec-safety.js";
 import { pickPrimaryTailnetIPv4 } from "../infra/tailnet.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { stylePromptTitle } from "../terminal/prompt-style.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+} from "../utils/message-channel.js";
 import { CONFIG_DIR, resolveUserPath } from "../utils.js";
 import { VERSION } from "../version.js";
-import type { NodeManagerChoice, ResetScope } from "./onboard-types.js";
+import type {
+  NodeManagerChoice,
+  OnboardMode,
+  ResetScope,
+} from "./onboard-types.js";
 
-export function guardCancel<T>(value: T, runtime: RuntimeEnv): T {
+export function guardCancel<T>(value: T | symbol, runtime: RuntimeEnv): T {
   if (isCancel(value)) {
-    cancel("Setup cancelled.");
+    cancel(stylePromptTitle("Setup cancelled.") ?? "Setup cancelled.");
     runtime.exit(0);
   }
-  return value;
+  return value as T;
 }
 
 export function summarizeExistingConfig(config: ClawdbotConfig): string {
   const rows: string[] = [];
-  if (config.agent?.workspace)
-    rows.push(`workspace: ${config.agent.workspace}`);
-  if (config.agent?.model) {
+  const defaults = config.agents?.defaults;
+  if (defaults?.workspace) rows.push(`workspace: ${defaults.workspace}`);
+  if (defaults?.model) {
     const model =
-      typeof config.agent.model === "string"
-        ? config.agent.model
-        : config.agent.model.primary;
+      typeof defaults.model === "string"
+        ? defaults.model
+        : defaults.model.primary;
     if (model) rows.push(`model: ${model}`);
   }
   if (config.gateway?.mode) rows.push(`gateway.mode: ${config.gateway.mode}`);
@@ -72,7 +82,7 @@ export function printWizardHeader(runtime: RuntimeEnv) {
 
 export function applyWizardMetadata(
   cfg: ClawdbotConfig,
-  params: { command: string; mode: "local" | "remote" },
+  params: { command: string; mode: OnboardMode },
 ): ClawdbotConfig {
   const commit =
     process.env.GIT_COMMIT?.trim() || process.env.GIT_SHA?.trim() || undefined;
@@ -124,9 +134,14 @@ type BrowserOpenCommand = {
   argv: string[] | null;
   reason?: string;
   command?: string;
+  /**
+   * Whether the URL must be wrapped in quotes when appended to argv.
+   * Needed for Windows `cmd /c start` where `&` splits commands.
+   */
+  quoteUrl?: boolean;
 };
 
-async function resolveBrowserOpenCommand(): Promise<BrowserOpenCommand> {
+export async function resolveBrowserOpenCommand(): Promise<BrowserOpenCommand> {
   const platform = process.platform;
   const hasDisplay = Boolean(
     process.env.DISPLAY || process.env.WAYLAND_DISPLAY,
@@ -141,7 +156,11 @@ async function resolveBrowserOpenCommand(): Promise<BrowserOpenCommand> {
   }
 
   if (platform === "win32") {
-    return { argv: ["cmd", "/c", "start", ""], command: "cmd" };
+    return {
+      argv: ["cmd", "/c", "start", ""],
+      command: "cmd",
+      quoteUrl: true,
+    };
   }
 
   if (platform === "darwin") {
@@ -213,9 +232,22 @@ function resolveSshTargetHint(): string {
 export async function openUrl(url: string): Promise<boolean> {
   const resolved = await resolveBrowserOpenCommand();
   if (!resolved.argv) return false;
-  const command = [...resolved.argv, url];
+  const quoteUrl = resolved.quoteUrl === true;
+  const command = [...resolved.argv];
+  if (quoteUrl) {
+    if (command.at(-1) === "") {
+      // Preserve the empty title token for `start` when using verbatim args.
+      command[command.length - 1] = '""';
+    }
+    command.push(`"${url}"`);
+  } else {
+    command.push(url);
+  }
   try {
-    await runCommandWithTimeout(command, { timeoutMs: 5_000 });
+    await runCommandWithTimeout(command, {
+      timeoutMs: 5_000,
+      windowsVerbatimArguments: quoteUrl,
+    });
     return true;
   } catch {
     // ignore; we still print the URL for manual open
@@ -223,17 +255,39 @@ export async function openUrl(url: string): Promise<boolean> {
   }
 }
 
+export async function copyToClipboard(value: string): Promise<boolean> {
+  const attempts: Array<{ argv: string[] }> = [
+    { argv: ["pbcopy"] },
+    { argv: ["xclip", "-selection", "clipboard"] },
+    { argv: ["wl-copy"] },
+    { argv: ["clip.exe"] }, // WSL / Windows
+    { argv: ["powershell", "-NoProfile", "-Command", "Set-Clipboard"] },
+  ];
+  for (const attempt of attempts) {
+    try {
+      const result = await runCommandWithTimeout(attempt.argv, {
+        timeoutMs: 3_000,
+        input: value,
+      });
+      if (result.code === 0 && !result.killed) return true;
+    } catch {
+      // keep trying the next fallback
+    }
+  }
+  return false;
+}
+
 export async function ensureWorkspaceAndSessions(
   workspaceDir: string,
   runtime: RuntimeEnv,
-  options?: { skipBootstrap?: boolean },
+  options?: { skipBootstrap?: boolean; agentId?: string },
 ) {
   const ws = await ensureAgentWorkspace({
     dir: workspaceDir,
     ensureBootstrapFiles: !options?.skipBootstrap,
   });
   runtime.log(`Workspace OK: ${ws.dir}`);
-  const sessionsDir = resolveSessionTranscriptsDir();
+  const sessionsDir = resolveSessionTranscriptsDirForAgent(options?.agentId);
   await fs.mkdir(sessionsDir, { recursive: true });
   runtime.log(`Sessions OK: ${sessionsDir}`);
 }
@@ -275,7 +329,7 @@ export async function handleReset(
   await moveToTrash(CONFIG_PATH_CLAWDBOT, runtime);
   if (scope === "config") return;
   await moveToTrash(path.join(CONFIG_DIR, "credentials"), runtime);
-  await moveToTrash(resolveSessionTranscriptsDir(), runtime);
+  await moveToTrash(resolveSessionTranscriptsDirForAgent(), runtime);
   if (scope === "full") {
     await moveToTrash(workspaceDir, runtime);
   }
@@ -283,8 +337,14 @@ export async function handleReset(
 
 export async function detectBinary(name: string): Promise<boolean> {
   if (!name?.trim()) return false;
+  if (!isSafeExecutableValue(name)) return false;
   const resolved = name.startsWith("~") ? resolveUserPath(name) : name;
-  if (path.isAbsolute(resolved) || resolved.startsWith(".")) {
+  if (
+    path.isAbsolute(resolved) ||
+    resolved.startsWith(".") ||
+    resolved.includes("/") ||
+    resolved.includes("\\")
+  ) {
     try {
       await fs.access(resolved);
       return true;
@@ -296,7 +356,7 @@ export async function detectBinary(name: string): Promise<boolean> {
   const command =
     process.platform === "win32"
       ? ["where", name]
-      : ["/usr/bin/env", "sh", "-lc", `command -v ${name}`];
+      : ["/usr/bin/env", "which", name];
   try {
     const result = await runCommandWithTimeout(command, { timeoutMs: 2000 });
     return result.code === 0 && result.stdout.trim().length > 0;
@@ -320,8 +380,8 @@ export async function probeGatewayReachable(params: {
       password: params.password,
       method: "health",
       timeoutMs,
-      clientName: "clawdbot-probe",
-      mode: "probe",
+      clientName: GATEWAY_CLIENT_NAMES.PROBE,
+      mode: GATEWAY_CLIENT_MODES.PROBE,
     });
     return { ok: true };
   } catch (err) {
@@ -350,16 +410,21 @@ export const DEFAULT_WORKSPACE = DEFAULT_AGENT_WORKSPACE_DIR;
 
 export function resolveControlUiLinks(params: {
   port: number;
-  bind?: "auto" | "lan" | "tailnet" | "loopback";
+  bind?: "auto" | "lan" | "loopback" | "custom";
+  customBindHost?: string;
   basePath?: string;
 }): { httpUrl: string; wsUrl: string } {
   const port = params.port;
   const bind = params.bind ?? "loopback";
+  const customBindHost = params.customBindHost?.trim();
   const tailnetIPv4 = pickPrimaryTailnetIPv4();
-  const host =
-    bind === "tailnet" || (bind === "auto" && tailnetIPv4)
-      ? (tailnetIPv4 ?? "127.0.0.1")
-      : "127.0.0.1";
+  const host = (() => {
+    if (bind === "custom" && customBindHost && isValidIPv4(customBindHost)) {
+      return customBindHost;
+    }
+    if (bind === "auto" && tailnetIPv4) return tailnetIPv4 ?? "127.0.0.1";
+    return "127.0.0.1";
+  })();
   const basePath = normalizeControlUiBasePath(params.basePath);
   const uiPath = basePath ? `${basePath}/` : "/";
   const wsPath = basePath ? basePath : "";
@@ -367,4 +432,13 @@ export function resolveControlUiLinks(params: {
     httpUrl: `http://${host}:${port}${uiPath}`,
     wsUrl: `ws://${host}:${port}${wsPath}`,
   };
+}
+
+function isValidIPv4(host: string): boolean {
+  const parts = host.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    const n = Number.parseInt(part, 10);
+    return !Number.isNaN(n) && n >= 0 && n <= 255 && part === String(n);
+  });
 }

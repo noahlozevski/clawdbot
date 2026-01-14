@@ -4,7 +4,9 @@ import process from "node:process";
 declare const __CLAWDBOT_VERSION__: string;
 
 const BUNDLED_VERSION =
-  typeof __CLAWDBOT_VERSION__ === "string" ? __CLAWDBOT_VERSION__ : "0.0.0";
+  (typeof __CLAWDBOT_VERSION__ === "string" && __CLAWDBOT_VERSION__) ||
+  process.env.CLAWDBOT_BUNDLED_VERSION ||
+  "0.0.0";
 
 function argValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
@@ -80,14 +82,14 @@ async function main() {
     "loopback";
   const bind =
     bindRaw === "loopback" ||
-    bindRaw === "tailnet" ||
     bindRaw === "lan" ||
-    bindRaw === "auto"
+    bindRaw === "auto" ||
+    bindRaw === "custom"
       ? bindRaw
       : null;
   if (!bind) {
     defaultRuntime.error(
-      'Invalid --bind (use "loopback", "tailnet", "lan", or "auto")',
+      'Invalid --bind (use "loopback", "lan", "auto", or "custom")',
     );
     process.exit(1);
   }
@@ -149,9 +151,18 @@ async function main() {
     })();
   };
 
-  const onSigterm = () => request("stop", "SIGTERM");
-  const onSigint = () => request("stop", "SIGINT");
-  const onSigusr1 = () => request("restart", "SIGUSR1");
+  const onSigterm = () => {
+    defaultRuntime.log("gateway: signal SIGTERM received");
+    request("stop", "SIGTERM");
+  };
+  const onSigint = () => {
+    defaultRuntime.log("gateway: signal SIGINT received");
+    request("stop", "SIGINT");
+  };
+  const onSigusr1 = () => {
+    defaultRuntime.log("gateway: signal SIGUSR1 received");
+    request("restart", "SIGUSR1");
+  };
 
   process.on("SIGTERM", onSigterm);
   process.on("SIGINT", onSigint);

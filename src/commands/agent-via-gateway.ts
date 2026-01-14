@@ -1,4 +1,6 @@
+import { DEFAULT_CHAT_CHANNEL } from "../channels/registry.js";
 import type { CliDeps } from "../cli/deps.js";
+import { withProgress } from "../cli/progress.js";
 import { loadConfig } from "../config/config.js";
 import {
   loadSessionStore,
@@ -6,7 +8,13 @@ import {
   resolveStorePath,
 } from "../config/sessions.js";
 import { callGateway, randomIdempotencyKey } from "../gateway/call.js";
+import { normalizeMainKey } from "../routing/session-key.js";
 import type { RuntimeEnv } from "../runtime.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+  normalizeMessageChannel,
+} from "../utils/message-channel.js";
 import { agentCommand } from "./agent.js";
 
 type AgentGatewayResult = {
@@ -34,7 +42,7 @@ export type AgentCliOpts = {
   json?: boolean;
   timeout?: string;
   deliver?: boolean;
-  provider?: string;
+  channel?: string;
   bestEffortDeliver?: boolean;
   lane?: string;
   runId?: string;
@@ -49,7 +57,7 @@ function resolveGatewaySessionKey(opts: {
 }): string | undefined {
   const sessionCfg = opts.cfg.session;
   const scope = sessionCfg?.scope ?? "per-sender";
-  const mainKey = sessionCfg?.mainKey ?? "main";
+  const mainKey = normalizeMainKey(sessionCfg?.mainKey);
   const storePath = resolveStorePath(sessionCfg?.store);
   const store = loadSessionStore(storePath);
 
@@ -78,17 +86,11 @@ function parseTimeoutSeconds(opts: {
   const raw =
     opts.timeout !== undefined
       ? Number.parseInt(String(opts.timeout), 10)
-      : (opts.cfg.agent?.timeoutSeconds ?? 600);
+      : (opts.cfg.agents?.defaults?.timeoutSeconds ?? 600);
   if (Number.isNaN(raw) || raw <= 0) {
     throw new Error("--timeout must be a positive integer (seconds)");
   }
   return raw;
-}
-
-function normalizeProvider(raw?: string): string | undefined {
-  const normalized = raw?.trim().toLowerCase();
-  if (!normalized) return undefined;
-  return normalized === "imsg" ? "imessage" : normalized;
 }
 
 function formatPayloadForLog(payload: {
@@ -127,29 +129,37 @@ export async function agentViaGatewayCommand(
     sessionId: opts.sessionId,
   });
 
-  const provider = normalizeProvider(opts.provider) ?? "whatsapp";
+  const channel = normalizeMessageChannel(opts.channel) ?? DEFAULT_CHAT_CHANNEL;
   const idempotencyKey = opts.runId?.trim() || randomIdempotencyKey();
 
-  const response = await callGateway<GatewayAgentResponse>({
-    method: "agent",
-    params: {
-      message: body,
-      to: opts.to,
-      sessionId: opts.sessionId,
-      sessionKey,
-      thinking: opts.thinking,
-      deliver: Boolean(opts.deliver),
-      provider,
-      timeout: timeoutSeconds,
-      lane: opts.lane,
-      extraSystemPrompt: opts.extraSystemPrompt,
-      idempotencyKey,
+  const response = await withProgress(
+    {
+      label: "Waiting for agent reply…",
+      indeterminate: true,
+      enabled: opts.json !== true,
     },
-    expectFinal: true,
-    timeoutMs: gatewayTimeoutMs,
-    clientName: "cli",
-    mode: "cli",
-  });
+    async () =>
+      await callGateway<GatewayAgentResponse>({
+        method: "agent",
+        params: {
+          message: body,
+          to: opts.to,
+          sessionId: opts.sessionId,
+          sessionKey,
+          thinking: opts.thinking,
+          deliver: Boolean(opts.deliver),
+          channel,
+          timeout: timeoutSeconds,
+          lane: opts.lane,
+          extraSystemPrompt: opts.extraSystemPrompt,
+          idempotencyKey,
+        },
+        expectFinal: true,
+        timeoutMs: gatewayTimeoutMs,
+        clientName: GATEWAY_CLIENT_NAMES.CLI,
+        mode: GATEWAY_CLIENT_MODES.CLI,
+      }),
+  );
 
   if (opts.json) {
     runtime.log(JSON.stringify(response, null, 2));

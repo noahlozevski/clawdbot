@@ -2,8 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import JSON5 from "json5";
-
+import { resolveDefaultAgentId } from "../agents/agent-scope.js";
 import type { ClawdbotConfig } from "../config/config.js";
 import { resolveOAuthDir, resolveStateDir } from "../config/paths.js";
 import type { SessionEntry } from "../config/sessions.js";
@@ -12,10 +11,18 @@ import { createSubsystemLogger } from "../logging.js";
 import {
   buildAgentMainSessionKey,
   DEFAULT_ACCOUNT_ID,
-  DEFAULT_AGENT_ID,
   DEFAULT_MAIN_KEY,
   normalizeAgentId,
 } from "../routing/session-key.js";
+import {
+  ensureDir,
+  existsDir,
+  fileExists,
+  isLegacyWhatsAppAuthFile,
+  readSessionStoreJson5,
+  type SessionEntryLike,
+  safeReadDir,
+} from "./state-migrations.fs.js";
 
 export type LegacyStateDetection = {
   targetAgentId: string;
@@ -42,67 +49,12 @@ export type LegacyStateDetection = {
   preview: string[];
 };
 
-type SessionEntryLike = { sessionId?: string; updatedAt?: number } & Record<
-  string,
-  unknown
->;
-
 type MigrationLogger = {
   info: (message: string) => void;
   warn: (message: string) => void;
 };
 
 let autoMigrateChecked = false;
-
-function safeReadDir(dir: string): fs.Dirent[] {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-function existsDir(dir: string): boolean {
-  try {
-    return fs.existsSync(dir) && fs.statSync(dir).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function ensureDir(dir: string) {
-  fs.mkdirSync(dir, { recursive: true });
-}
-
-function fileExists(p: string): boolean {
-  try {
-    return fs.existsSync(p) && fs.statSync(p).isFile();
-  } catch {
-    return false;
-  }
-}
-
-function isLegacyWhatsAppAuthFile(name: string): boolean {
-  if (name === "creds.json" || name === "creds.json.bak") return true;
-  if (!name.endsWith(".json")) return false;
-  return /^(app-state-sync|session|sender-key|pre-key)-/.test(name);
-}
-
-function readSessionStoreJson5(storePath: string): {
-  store: Record<string, SessionEntryLike>;
-  ok: boolean;
-} {
-  try {
-    const raw = fs.readFileSync(storePath, "utf-8");
-    const parsed = JSON5.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      return { store: parsed as Record<string, SessionEntryLike>, ok: true };
-    }
-  } catch {
-    // ignore
-  }
-  return { store: {}, ok: false };
-}
 
 function isSurfaceGroupKey(key: string): boolean {
   return key.includes(":group:") || key.includes(":channel:");
@@ -174,8 +126,12 @@ function removeDirIfEmpty(dir: string) {
   }
 }
 
-export function resetAutoMigrateLegacyAgentDirForTest() {
+export function resetAutoMigrateLegacyStateForTest() {
   autoMigrateChecked = false;
+}
+
+export function resetAutoMigrateLegacyAgentDirForTest() {
+  resetAutoMigrateLegacyStateForTest();
 }
 
 export async function detectLegacyStateMigrations(params: {
@@ -188,9 +144,7 @@ export async function detectLegacyStateMigrations(params: {
   const stateDir = resolveStateDir(env, homedir);
   const oauthDir = resolveOAuthDir(env, stateDir);
 
-  const targetAgentId = normalizeAgentId(
-    params.cfg.routing?.defaultAgentId ?? DEFAULT_AGENT_ID,
-  );
+  const targetAgentId = normalizeAgentId(resolveDefaultAgentId(params.cfg));
   const rawMainKey = params.cfg.session?.mainKey;
   const targetMainKey =
     typeof rawMainKey === "string" && rawMainKey.trim().length > 0
@@ -479,6 +433,21 @@ export async function autoMigrateLegacyAgentDir(params: {
   changes: string[];
   warnings: string[];
 }> {
+  return await autoMigrateLegacyState(params);
+}
+
+export async function autoMigrateLegacyState(params: {
+  cfg: ClawdbotConfig;
+  env?: NodeJS.ProcessEnv;
+  homedir?: () => string;
+  log?: MigrationLogger;
+  now?: () => number;
+}): Promise<{
+  migrated: boolean;
+  skipped: boolean;
+  changes: string[];
+  warnings: string[];
+}> {
   if (autoMigrateChecked) {
     return { migrated: false, skipped: true, changes: [], warnings: [] };
   }
@@ -494,25 +463,27 @@ export async function autoMigrateLegacyAgentDir(params: {
     env,
     homedir: params.homedir,
   });
-  if (!detected.agentDir.hasLegacy) {
+  if (!detected.sessions.hasLegacy && !detected.agentDir.hasLegacy) {
     return { migrated: false, skipped: false, changes: [], warnings: [] };
   }
 
-  const { changes, warnings } = await migrateLegacyAgentDir(
-    detected,
-    params.now ?? (() => Date.now()),
-  );
+  const now = params.now ?? (() => Date.now());
+  const sessions = await migrateLegacySessions(detected, now);
+  const agentDir = await migrateLegacyAgentDir(detected, now);
+  const changes = [...sessions.changes, ...agentDir.changes];
+  const warnings = [...sessions.warnings, ...agentDir.warnings];
+
   const logger = params.log ?? createSubsystemLogger("state-migrations");
   if (changes.length > 0) {
     logger.info(
-      `Auto-migrated legacy agent dir:\n${changes
+      `Auto-migrated legacy state:\n${changes
         .map((entry) => `- ${entry}`)
         .join("\n")}`,
     );
   }
   if (warnings.length > 0) {
     logger.warn(
-      `Legacy agent dir migration warnings:\n${warnings
+      `Legacy state migration warnings:\n${warnings
         .map((entry) => `- ${entry}`)
         .join("\n")}`,
     );

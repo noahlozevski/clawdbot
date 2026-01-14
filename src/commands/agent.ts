@@ -1,15 +1,18 @@
-import crypto from "node:crypto";
-import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
-import { lookupContextTokens } from "../agents/context.js";
 import {
-  DEFAULT_CONTEXT_TOKENS,
-  DEFAULT_MODEL,
-  DEFAULT_PROVIDER,
-} from "../agents/defaults.js";
+  resolveAgentDir,
+  resolveAgentModelFallbacksOverride,
+  resolveAgentModelPrimary,
+  resolveAgentWorkspaceDir,
+} from "../agents/agent-scope.js";
+import { ensureAuthProfileStore } from "../agents/auth-profiles.js";
+import { runCliAgent } from "../agents/cli-runner.js";
+import { getCliSessionId } from "../agents/cli-session.js";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
 import { runWithModelFallback } from "../agents/model-fallback.js";
 import {
   buildAllowedModelSet,
+  isCliProvider,
   modelKey,
   resolveConfiguredModelRef,
   resolveThinkingDefault,
@@ -17,26 +20,21 @@ import {
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import { buildWorkspaceSkillSnapshot } from "../agents/skills.js";
 import { resolveAgentTimeoutMs } from "../agents/timeout.js";
-import { hasNonzeroUsage } from "../agents/usage.js";
+import { ensureAgentWorkspace } from "../agents/workspace.js";
 import {
-  DEFAULT_AGENT_WORKSPACE_DIR,
-  ensureAgentWorkspace,
-} from "../agents/workspace.js";
-import type { MsgContext } from "../auto-reply/templating.js";
-import {
+  formatThinkingLevels,
+  formatXHighModelHint,
   normalizeThinkLevel,
   normalizeVerboseLevel,
+  supportsXHighThinking,
   type ThinkLevel,
   type VerboseLevel,
 } from "../auto-reply/thinking.js";
 import { type CliDeps, createDefaultDeps } from "../cli/deps.js";
-import { type ClawdbotConfig, loadConfig } from "../config/config.js";
+import { loadConfig } from "../config/config.js";
 import {
-  DEFAULT_IDLE_MINUTES,
-  loadSessionStore,
-  resolveSessionKey,
-  resolveSessionTranscriptPath,
-  resolveStorePath,
+  resolveAgentIdFromSessionKey,
+  resolveSessionFilePath,
   type SessionEntry,
   saveSessionStore,
 } from "../config/sessions.js";
@@ -44,112 +42,14 @@ import {
   emitAgentEvent,
   registerAgentRunContext,
 } from "../infra/agent-events.js";
-import {
-  deliverOutboundPayloads,
-  normalizeOutboundPayloads,
-} from "../infra/outbound/deliver.js";
-import { resolveOutboundTarget } from "../infra/outbound/targets.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
+import { applyVerboseOverride } from "../sessions/level-overrides.js";
 import { resolveSendPolicy } from "../sessions/send-policy.js";
-import { normalizeE164 } from "../utils.js";
-
-type AgentCommandOpts = {
-  message: string;
-  to?: string;
-  sessionId?: string;
-  thinking?: string;
-  thinkingOnce?: string;
-  verbose?: string;
-  json?: boolean;
-  timeout?: string;
-  deliver?: boolean;
-  /** Message provider context (webchat|voicewake|whatsapp|...). */
-  messageProvider?: string;
-  provider?: string; // delivery provider (whatsapp|telegram|...)
-  bestEffortDeliver?: boolean;
-  abortSignal?: AbortSignal;
-  lane?: string;
-  runId?: string;
-  extraSystemPrompt?: string;
-};
-
-type SessionResolution = {
-  sessionId: string;
-  sessionKey?: string;
-  sessionEntry?: SessionEntry;
-  sessionStore?: Record<string, SessionEntry>;
-  storePath: string;
-  isNewSession: boolean;
-  persistedThinking?: ThinkLevel;
-  persistedVerbose?: VerboseLevel;
-};
-
-function resolveSession(opts: {
-  cfg: ClawdbotConfig;
-  to?: string;
-  sessionId?: string;
-}): SessionResolution {
-  const sessionCfg = opts.cfg.session;
-  const scope = sessionCfg?.scope ?? "per-sender";
-  const mainKey = sessionCfg?.mainKey ?? "main";
-  const idleMinutes = Math.max(
-    sessionCfg?.idleMinutes ?? DEFAULT_IDLE_MINUTES,
-    1,
-  );
-  const idleMs = idleMinutes * 60_000;
-  const storePath = resolveStorePath(sessionCfg?.store);
-  const sessionStore = loadSessionStore(storePath);
-  const now = Date.now();
-
-  const ctx: MsgContext | undefined = opts.to?.trim()
-    ? { From: opts.to }
-    : undefined;
-  let sessionKey: string | undefined = ctx
-    ? resolveSessionKey(scope, ctx, mainKey)
-    : undefined;
-  let sessionEntry = sessionKey ? sessionStore[sessionKey] : undefined;
-
-  // If a session id was provided, prefer to re-use its entry (by id) even when no key was derived.
-  if (
-    opts.sessionId &&
-    (!sessionEntry || sessionEntry.sessionId !== opts.sessionId)
-  ) {
-    const foundKey = Object.keys(sessionStore).find(
-      (key) => sessionStore[key]?.sessionId === opts.sessionId,
-    );
-    if (foundKey) {
-      sessionKey = sessionKey ?? foundKey;
-      sessionEntry = sessionStore[foundKey];
-    }
-  }
-
-  const fresh = sessionEntry && sessionEntry.updatedAt >= now - idleMs;
-  const sessionId =
-    opts.sessionId?.trim() ||
-    (fresh ? sessionEntry?.sessionId : undefined) ||
-    crypto.randomUUID();
-  const isNewSession = !fresh && !opts.sessionId;
-
-  const persistedThinking =
-    fresh && sessionEntry?.thinkingLevel
-      ? normalizeThinkLevel(sessionEntry.thinkingLevel)
-      : undefined;
-  const persistedVerbose =
-    fresh && sessionEntry?.verboseLevel
-      ? normalizeVerboseLevel(sessionEntry.verboseLevel)
-      : undefined;
-
-  return {
-    sessionId,
-    sessionKey,
-    sessionEntry,
-    sessionStore,
-    storePath,
-    isNewSession,
-    persistedThinking,
-    persistedVerbose,
-  };
-}
+import { resolveMessageChannel } from "../utils/message-channel.js";
+import { deliverAgentCommandResult } from "./agent/delivery.js";
+import { resolveSession } from "./agent/session.js";
+import { updateSessionStoreAfterAgentRun } from "./agent/session-store.js";
+import type { AgentCommandOpts } from "./agent/types.js";
 
 export async function agentCommand(
   opts: AgentCommandOpts,
@@ -158,33 +58,40 @@ export async function agentCommand(
 ) {
   const body = (opts.message ?? "").trim();
   if (!body) throw new Error("Message (--message) is required");
-  if (!opts.to && !opts.sessionId) {
+  if (!opts.to && !opts.sessionId && !opts.sessionKey) {
     throw new Error("Pass --to <E.164> or --session-id to choose a session");
   }
 
   const cfg = loadConfig();
-  const agentCfg = cfg.agent;
-  const workspaceDirRaw = cfg.agent?.workspace ?? DEFAULT_AGENT_WORKSPACE_DIR;
+  const agentCfg = cfg.agents?.defaults;
+  const sessionAgentId = resolveAgentIdFromSessionKey(opts.sessionKey?.trim());
+  const workspaceDirRaw = resolveAgentWorkspaceDir(cfg, sessionAgentId);
+  const agentDir = resolveAgentDir(cfg, sessionAgentId);
   const workspace = await ensureAgentWorkspace({
     dir: workspaceDirRaw,
-    ensureBootstrapFiles: !cfg.agent?.skipBootstrap,
+    ensureBootstrapFiles: !agentCfg?.skipBootstrap,
   });
   const workspaceDir = workspace.dir;
-
-  const allowFrom = (cfg.whatsapp?.allowFrom ?? [])
-    .map((val) => normalizeE164(val))
-    .filter((val) => val.length > 1);
+  const configuredModel = resolveConfiguredModelRef({
+    cfg,
+    defaultProvider: DEFAULT_PROVIDER,
+    defaultModel: DEFAULT_MODEL,
+  });
+  const thinkingLevelsHint = formatThinkingLevels(
+    configuredModel.provider,
+    configuredModel.model,
+  );
 
   const thinkOverride = normalizeThinkLevel(opts.thinking);
   const thinkOnce = normalizeThinkLevel(opts.thinkingOnce);
   if (opts.thinking && !thinkOverride) {
     throw new Error(
-      "Invalid thinking level. Use one of: off, minimal, low, medium, high.",
+      `Invalid thinking level. Use one of: ${thinkingLevelsHint}.`,
     );
   }
   if (opts.thinkingOnce && !thinkOnce) {
     throw new Error(
-      "Invalid one-shot thinking level. Use one of: off, minimal, low, medium, high.",
+      `Invalid one-shot thinking level. Use one of: ${thinkingLevelsHint}.`,
     );
   }
 
@@ -212,6 +119,7 @@ export async function agentCommand(
     cfg,
     to: opts.to,
     sessionId: opts.sessionId,
+    sessionKey: opts.sessionKey,
   });
 
   const {
@@ -227,16 +135,12 @@ export async function agentCommand(
   let sessionEntry = resolvedSessionEntry;
   const runId = opts.runId?.trim() || sessionId;
 
-  if (sessionKey) {
-    registerAgentRunContext(runId, { sessionKey });
-  }
-
   if (opts.deliver === true) {
     const sendPolicy = resolveSendPolicy({
       cfg,
       entry: sessionEntry,
       sessionKey,
-      provider: sessionEntry?.provider,
+      channel: sessionEntry?.channel,
       chatType: sessionEntry?.chatType,
     });
     if (sendPolicy === "deny") {
@@ -253,6 +157,13 @@ export async function agentCommand(
     verboseOverride ??
     persistedVerbose ??
     (agentCfg?.verboseDefault as VerboseLevel | undefined);
+
+  if (sessionKey) {
+    registerAgentRunContext(runId, {
+      sessionKey,
+      verboseLevel: resolvedVerboseLevel,
+    });
+  }
 
   const needsSkillsSnapshot = isNewSession || !sessionEntry?.skillsSnapshot;
   const skillsSnapshot = needsSkillsSnapshot
@@ -284,17 +195,33 @@ export async function agentCommand(
       if (thinkOverride === "off") delete next.thinkingLevel;
       else next.thinkingLevel = thinkOverride;
     }
-    if (verboseOverride) {
-      if (verboseOverride === "off") delete next.verboseLevel;
-      else next.verboseLevel = verboseOverride;
-    }
+    applyVerboseOverride(next, verboseOverride);
     sessionStore[sessionKey] = next;
     await saveSessionStore(storePath, sessionStore);
   }
 
+  const agentModelPrimary = resolveAgentModelPrimary(cfg, sessionAgentId);
+  const cfgForModelSelection = agentModelPrimary
+    ? {
+        ...cfg,
+        agents: {
+          ...cfg.agents,
+          defaults: {
+            ...cfg.agents?.defaults,
+            model: {
+              ...(typeof cfg.agents?.defaults?.model === "object"
+                ? cfg.agents.defaults.model
+                : undefined),
+              primary: agentModelPrimary,
+            },
+          },
+        },
+      }
+    : cfg;
+
   const { provider: defaultProvider, model: defaultModel } =
     resolveConfiguredModelRef({
-      cfg,
+      cfg: cfgForModelSelection,
       defaultProvider: DEFAULT_PROVIDER,
       defaultModel: DEFAULT_MODEL,
     });
@@ -316,6 +243,7 @@ export async function agentCommand(
       cfg,
       catalog: modelCatalog,
       defaultProvider,
+      defaultModel,
     });
     allowedModelKeys = allowed.allowedKeys;
     allowedModelCatalog = allowed.allowedCatalog;
@@ -327,7 +255,11 @@ export async function agentCommand(
     const overrideModel = sessionEntry.modelOverride?.trim();
     if (overrideModel) {
       const key = modelKey(overrideProvider, overrideModel);
-      if (allowedModelKeys.size > 0 && !allowedModelKeys.has(key)) {
+      if (
+        !isCliProvider(overrideProvider, cfg) &&
+        allowedModelKeys.size > 0 &&
+        !allowedModelKeys.has(key)
+      ) {
         delete sessionEntry.providerOverride;
         delete sessionEntry.modelOverride;
         sessionEntry.updatedAt = Date.now();
@@ -342,7 +274,11 @@ export async function agentCommand(
   if (storedModelOverride) {
     const candidateProvider = storedProviderOverride || defaultProvider;
     const key = modelKey(candidateProvider, storedModelOverride);
-    if (allowedModelKeys.size === 0 || allowedModelKeys.has(key)) {
+    if (
+      isCliProvider(candidateProvider, cfg) ||
+      allowedModelKeys.size === 0 ||
+      allowedModelKeys.has(key)
+    ) {
       provider = candidateProvider;
       model = storedModelOverride;
     }
@@ -373,7 +309,32 @@ export async function agentCommand(
       catalog: catalogForThinking,
     });
   }
-  const sessionFile = resolveSessionTranscriptPath(sessionId);
+  if (
+    resolvedThinkLevel === "xhigh" &&
+    !supportsXHighThinking(provider, model)
+  ) {
+    const explicitThink = Boolean(thinkOnce || thinkOverride);
+    if (explicitThink) {
+      throw new Error(
+        `Thinking level "xhigh" is only supported for ${formatXHighModelHint()}.`,
+      );
+    }
+    resolvedThinkLevel = "high";
+    if (
+      sessionEntry &&
+      sessionStore &&
+      sessionKey &&
+      sessionEntry.thinkingLevel === "xhigh"
+    ) {
+      sessionEntry.thinkingLevel = "high";
+      sessionEntry.updatedAt = Date.now();
+      sessionStore[sessionKey] = sessionEntry;
+      await saveSessionStore(storePath, sessionStore);
+    }
+  }
+  const sessionFile = resolveSessionFilePath(sessionId, sessionEntry, {
+    agentId: sessionAgentId,
+  });
 
   const startedAt = Date.now();
   let lifecycleEnded = false;
@@ -382,27 +343,48 @@ export async function agentCommand(
   let fallbackProvider = provider;
   let fallbackModel = model;
   try {
-    const messageProvider =
-      opts.messageProvider?.trim().toLowerCase() ||
-      (() => {
-        const raw = opts.provider?.trim().toLowerCase();
-        if (!raw) return undefined;
-        return raw === "imsg" ? "imessage" : raw;
-      })();
+    const messageChannel = resolveMessageChannel(
+      opts.messageChannel,
+      opts.channel,
+    );
     const fallbackResult = await runWithModelFallback({
       cfg,
       provider,
       model,
-      run: (providerOverride, modelOverride) =>
-        runEmbeddedPiAgent({
+      fallbacksOverride: resolveAgentModelFallbacksOverride(
+        cfg,
+        sessionAgentId,
+      ),
+      run: (providerOverride, modelOverride) => {
+        if (isCliProvider(providerOverride, cfg)) {
+          const cliSessionId = getCliSessionId(sessionEntry, providerOverride);
+          return runCliAgent({
+            sessionId,
+            sessionKey,
+            sessionFile,
+            workspaceDir,
+            config: cfg,
+            prompt: body,
+            provider: providerOverride,
+            model: modelOverride,
+            thinkLevel: resolvedThinkLevel,
+            timeoutMs,
+            runId,
+            extraSystemPrompt: opts.extraSystemPrompt,
+            cliSessionId,
+            images: opts.images,
+          });
+        }
+        return runEmbeddedPiAgent({
           sessionId,
           sessionKey,
-          messageProvider,
+          messageChannel,
           sessionFile,
           workspaceDir,
           config: cfg,
           skillsSnapshot,
           prompt: body,
+          images: opts.images,
           provider: providerOverride,
           model: modelOverride,
           authProfileId: sessionEntry?.authProfileOverride,
@@ -413,6 +395,7 @@ export async function agentCommand(
           lane: opts.lane,
           abortSignal: opts.abortSignal,
           extraSystemPrompt: opts.extraSystemPrompt,
+          agentDir,
           onAgentEvent: (evt) => {
             if (
               evt.stream === "lifecycle" &&
@@ -427,7 +410,8 @@ export async function agentCommand(
               data: evt.data,
             });
           },
-        }),
+        });
+      },
     });
     result = fallbackResult.result;
     fallbackProvider = fallbackResult.provider;
@@ -462,155 +446,29 @@ export async function agentCommand(
 
   // Update token+model fields in the session store.
   if (sessionStore && sessionKey) {
-    const usage = result.meta.agentMeta?.usage;
-    const modelUsed = result.meta.agentMeta?.model ?? fallbackModel ?? model;
-    const providerUsed =
-      result.meta.agentMeta?.provider ?? fallbackProvider ?? provider;
-    const contextTokens =
-      agentCfg?.contextTokens ??
-      lookupContextTokens(modelUsed) ??
-      DEFAULT_CONTEXT_TOKENS;
-
-    const entry = sessionStore[sessionKey] ?? {
+    await updateSessionStoreAfterAgentRun({
+      cfg,
+      contextTokensOverride: agentCfg?.contextTokens,
       sessionId,
-      updatedAt: Date.now(),
-    };
-    const next: SessionEntry = {
-      ...entry,
-      sessionId,
-      updatedAt: Date.now(),
-      modelProvider: providerUsed,
-      model: modelUsed,
-      contextTokens,
-    };
-    next.abortedLastRun = result.meta.aborted ?? false;
-    if (hasNonzeroUsage(usage)) {
-      const input = usage.input ?? 0;
-      const output = usage.output ?? 0;
-      const promptTokens =
-        input + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-      next.inputTokens = input;
-      next.outputTokens = output;
-      next.totalTokens =
-        promptTokens > 0 ? promptTokens : (usage.total ?? input);
-    }
-    sessionStore[sessionKey] = next;
-    await saveSessionStore(storePath, sessionStore);
+      sessionKey,
+      storePath,
+      sessionStore,
+      defaultProvider: provider,
+      defaultModel: model,
+      fallbackProvider,
+      fallbackModel,
+      result,
+    });
   }
 
   const payloads = result.payloads ?? [];
-  const deliver = opts.deliver === true;
-  const bestEffortDeliver = opts.bestEffortDeliver === true;
-  const deliveryProviderRaw = (opts.provider ?? "whatsapp").toLowerCase();
-  const deliveryProvider =
-    deliveryProviderRaw === "imsg" ? "imessage" : deliveryProviderRaw;
-
-  const logDeliveryError = (err: unknown) => {
-    const message = `Delivery failed (${deliveryProvider}${deliveryTarget ? ` to ${deliveryTarget}` : ""}): ${String(err)}`;
-    runtime.error?.(message);
-    if (!runtime.error) runtime.log(message);
-  };
-
-  const isDeliveryProviderKnown =
-    deliveryProvider === "whatsapp" ||
-    deliveryProvider === "telegram" ||
-    deliveryProvider === "discord" ||
-    deliveryProvider === "slack" ||
-    deliveryProvider === "signal" ||
-    deliveryProvider === "imessage" ||
-    deliveryProvider === "webchat";
-
-  const resolvedTarget =
-    deliver && isDeliveryProviderKnown
-      ? resolveOutboundTarget({
-          provider: deliveryProvider,
-          to: opts.to,
-          allowFrom,
-        })
-      : null;
-  const deliveryTarget = resolvedTarget?.ok ? resolvedTarget.to : undefined;
-
-  if (deliver) {
-    if (!isDeliveryProviderKnown) {
-      const err = new Error(`Unknown provider: ${deliveryProvider}`);
-      if (!bestEffortDeliver) throw err;
-      logDeliveryError(err);
-    } else if (resolvedTarget && !resolvedTarget.ok) {
-      if (!bestEffortDeliver) throw resolvedTarget.error;
-      logDeliveryError(resolvedTarget.error);
-    }
-  }
-
-  if (opts.json) {
-    const normalizedPayloads = payloads.map((p) => ({
-      text: p.text ?? "",
-      mediaUrl: p.mediaUrl ?? null,
-      mediaUrls: p.mediaUrls ?? (p.mediaUrl ? [p.mediaUrl] : undefined),
-    }));
-    runtime.log(
-      JSON.stringify(
-        { payloads: normalizedPayloads, meta: result.meta },
-        null,
-        2,
-      ),
-    );
-    if (!deliver) {
-      return { payloads: normalizedPayloads, meta: result.meta };
-    }
-  }
-
-  if (payloads.length === 0) {
-    runtime.log("No reply from agent.");
-    return { payloads: [], meta: result.meta };
-  }
-
-  const deliveryPayloads = normalizeOutboundPayloads(payloads);
-  const logPayload = (payload: { text: string; mediaUrls: string[] }) => {
-    if (opts.json) return;
-    const lines: string[] = [];
-    if (payload.text) lines.push(payload.text.trimEnd());
-    for (const url of payload.mediaUrls) lines.push(`MEDIA:${url}`);
-    runtime.log(lines.join("\n"));
-  };
-  if (!deliver) {
-    for (const payload of deliveryPayloads) {
-      logPayload(payload);
-    }
-  }
-  if (
-    deliver &&
-    (deliveryProvider === "whatsapp" ||
-      deliveryProvider === "telegram" ||
-      deliveryProvider === "discord" ||
-      deliveryProvider === "slack" ||
-      deliveryProvider === "signal" ||
-      deliveryProvider === "imessage")
-  ) {
-    if (deliveryTarget) {
-      await deliverOutboundPayloads({
-        cfg,
-        provider: deliveryProvider,
-        to: deliveryTarget,
-        payloads: deliveryPayloads,
-        bestEffort: bestEffortDeliver,
-        onError: (err) => logDeliveryError(err),
-        onPayload: logPayload,
-        deps: {
-          sendWhatsApp: deps.sendMessageWhatsApp,
-          sendTelegram: deps.sendMessageTelegram,
-          sendDiscord: deps.sendMessageDiscord,
-          sendSlack: deps.sendMessageSlack,
-          sendSignal: deps.sendMessageSignal,
-          sendIMessage: deps.sendMessageIMessage,
-        },
-      });
-    }
-  }
-
-  const normalizedPayloads = payloads.map((p) => ({
-    text: p.text ?? "",
-    mediaUrl: p.mediaUrl ?? null,
-    mediaUrls: p.mediaUrls ?? (p.mediaUrl ? [p.mediaUrl] : undefined),
-  }));
-  return { payloads: normalizedPayloads, meta: result.meta };
+  return await deliverAgentCommandResult({
+    cfg,
+    deps,
+    runtime,
+    opts,
+    sessionEntry,
+    result,
+    payloads,
+  });
 }

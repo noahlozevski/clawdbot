@@ -1,5 +1,14 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
+import {
+  CURRENT_SESSION_VERSION,
+  SessionManager,
+} from "@mariozechner/pi-coding-agent";
+import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { getChannelDock } from "../../channels/dock.js";
+import { normalizeChannelId } from "../../channels/registry.js";
 import type { ClawdbotConfig } from "../../config/config.js";
 import {
   buildGroupDisplayName,
@@ -7,14 +16,16 @@ import {
   DEFAULT_RESET_TRIGGERS,
   type GroupKeyResolution,
   loadSessionStore,
-  resolveAgentIdFromSessionKey,
   resolveGroupSessionKey,
+  resolveSessionFilePath,
   resolveSessionKey,
+  resolveSessionTranscriptPath,
   resolveStorePath,
   type SessionEntry,
   type SessionScope,
   saveSessionStore,
 } from "../../config/sessions.js";
+import { normalizeMainKey } from "../../routing/session-key.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
@@ -36,15 +47,67 @@ export type SessionInitResult = {
   triggerBodyNormalized: string;
 };
 
+function forkSessionFromParent(params: {
+  parentEntry: SessionEntry;
+}): { sessionId: string; sessionFile: string } | null {
+  const parentSessionFile = resolveSessionFilePath(
+    params.parentEntry.sessionId,
+    params.parentEntry,
+  );
+  if (!parentSessionFile || !fs.existsSync(parentSessionFile)) return null;
+  try {
+    const manager = SessionManager.open(parentSessionFile);
+    const leafId = manager.getLeafId();
+    if (leafId) {
+      const sessionFile =
+        manager.createBranchedSession(leafId) ?? manager.getSessionFile();
+      const sessionId = manager.getSessionId();
+      if (sessionFile && sessionId) return { sessionId, sessionFile };
+    }
+    const sessionId = crypto.randomUUID();
+    const timestamp = new Date().toISOString();
+    const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+    const sessionFile = path.join(
+      manager.getSessionDir(),
+      `${fileTimestamp}_${sessionId}.jsonl`,
+    );
+    const header = {
+      type: "session",
+      version: CURRENT_SESSION_VERSION,
+      id: sessionId,
+      timestamp,
+      cwd: manager.getCwd(),
+      parentSession: parentSessionFile,
+    };
+    fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf-8");
+    return { sessionId, sessionFile };
+  } catch {
+    return null;
+  }
+}
+
 export async function initSessionState(params: {
   ctx: MsgContext;
   cfg: ClawdbotConfig;
   commandAuthorized: boolean;
 }): Promise<SessionInitResult> {
   const { ctx, cfg, commandAuthorized } = params;
+  // Native slash commands (Telegram/Discord/Slack) are delivered on a separate
+  // "slash session" key, but should mutate the target chat session.
+  const targetSessionKey =
+    ctx.CommandSource === "native"
+      ? ctx.CommandTargetSessionKey?.trim()
+      : undefined;
+  const sessionCtxForState =
+    targetSessionKey && targetSessionKey !== ctx.SessionKey
+      ? { ...ctx, SessionKey: targetSessionKey }
+      : ctx;
   const sessionCfg = cfg.session;
-  const mainKey = sessionCfg?.mainKey ?? "main";
-  const agentId = resolveAgentIdFromSessionKey(ctx.SessionKey);
+  const mainKey = normalizeMainKey(sessionCfg?.mainKey);
+  const agentId = resolveSessionAgentId({
+    sessionKey: sessionCtxForState.SessionKey,
+    config: cfg,
+  });
   const resetTriggers = sessionCfg?.resetTriggers?.length
     ? sessionCfg.resetTriggers
     : DEFAULT_RESET_TRIGGERS;
@@ -68,17 +131,23 @@ export async function initSessionState(params: {
 
   let persistedThinking: string | undefined;
   let persistedVerbose: string | undefined;
+  let persistedReasoning: string | undefined;
   let persistedModelOverride: string | undefined;
   let persistedProviderOverride: string | undefined;
 
-  const groupResolution = resolveGroupSessionKey(ctx) ?? undefined;
+  const groupResolution =
+    resolveGroupSessionKey(sessionCtxForState) ?? undefined;
   const isGroup =
     ctx.ChatType?.trim().toLowerCase() === "group" || Boolean(groupResolution);
-  const triggerBodyNormalized = stripStructuralPrefixes(ctx.Body ?? "")
+  // Prefer CommandBody/RawBody (clean message) for command detection; fall back
+  // to Body which may contain structural context (history, sender labels).
+  const commandSource = ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "";
+  const triggerBodyNormalized = stripStructuralPrefixes(commandSource)
     .trim()
     .toLowerCase();
 
-  const rawBody = ctx.Body ?? "";
+  // Use CommandBody/RawBody for reset trigger matching (clean message without structural context).
+  const rawBody = commandSource;
   const trimmedBody = rawBody.trim();
   const resetAuthorized = resolveCommandAuthorization({
     ctx,
@@ -89,7 +158,7 @@ export async function initSessionState(params: {
   // web inbox before we get here. They prevented reset triggers like "/new"
   // from matching, so strip structural wrappers when checking for resets.
   const strippedForReset = isGroup
-    ? stripMentions(triggerBodyNormalized, ctx, cfg)
+    ? stripMentions(triggerBodyNormalized, ctx, cfg, agentId)
     : triggerBodyNormalized;
   for (const trigger of resetTriggers) {
     if (!trigger) continue;
@@ -110,7 +179,7 @@ export async function initSessionState(params: {
     }
   }
 
-  sessionKey = resolveSessionKey(sessionScope, ctx, mainKey);
+  sessionKey = resolveSessionKey(sessionScope, sessionCtxForState, mainKey);
   if (groupResolution?.legacyKey && groupResolution.legacyKey !== sessionKey) {
     const legacyEntry = sessionStore[groupResolution.legacyKey];
     if (legacyEntry && !sessionStore[sessionKey]) {
@@ -128,6 +197,7 @@ export async function initSessionState(params: {
     abortedLastRun = entry.abortedLastRun ?? false;
     persistedThinking = entry.thinkingLevel;
     persistedVerbose = entry.verboseLevel;
+    persistedReasoning = entry.reasoningLevel;
     persistedModelOverride = entry.modelOverride;
     persistedProviderOverride = entry.providerOverride;
   } else {
@@ -147,6 +217,8 @@ export async function initSessionState(params: {
     // Persist previously stored thinking/verbose levels when present.
     thinkingLevel: persistedThinking ?? baseEntry?.thinkingLevel,
     verboseLevel: persistedVerbose ?? baseEntry?.verboseLevel,
+    reasoningLevel: persistedReasoning ?? baseEntry?.reasoningLevel,
+    responseUsage: baseEntry?.responseUsage,
     modelOverride: persistedModelOverride ?? baseEntry?.modelOverride,
     providerOverride: persistedProviderOverride ?? baseEntry?.providerOverride,
     sendPolicy: baseEntry?.sendPolicy,
@@ -156,17 +228,23 @@ export async function initSessionState(params: {
     queueDrop: baseEntry?.queueDrop,
     displayName: baseEntry?.displayName,
     chatType: baseEntry?.chatType,
-    provider: baseEntry?.provider,
+    channel: baseEntry?.channel,
     subject: baseEntry?.subject,
     room: baseEntry?.room,
     space: baseEntry?.space,
   };
-  if (groupResolution?.provider) {
-    const provider = groupResolution.provider;
+  if (groupResolution?.channel) {
+    const channel = groupResolution.channel;
     const subject = ctx.GroupSubject?.trim();
     const space = ctx.GroupSpace?.trim();
     const explicitRoom = ctx.GroupRoom?.trim();
-    const isRoomProvider = provider === "discord" || provider === "slack";
+    const normalizedChannel = normalizeChannelId(channel);
+    const isRoomProvider = Boolean(
+      normalizedChannel &&
+        getChannelDock(normalizedChannel)?.capabilities.chatTypes.includes(
+          "channel",
+        ),
+    );
     const nextRoom =
       explicitRoom ??
       (isRoomProvider && subject && subject.startsWith("#")
@@ -174,12 +252,12 @@ export async function initSessionState(params: {
         : undefined);
     const nextSubject = nextRoom ? undefined : subject;
     sessionEntry.chatType = groupResolution.chatType ?? "group";
-    sessionEntry.provider = provider;
+    sessionEntry.channel = channel;
     if (nextSubject) sessionEntry.subject = nextSubject;
     if (nextRoom) sessionEntry.room = nextRoom;
     if (space) sessionEntry.space = space;
     sessionEntry.displayName = buildGroupDisplayName({
-      provider: sessionEntry.provider,
+      provider: sessionEntry.channel,
       subject: sessionEntry.subject,
       room: sessionEntry.room,
       space: sessionEntry.space,
@@ -189,12 +267,41 @@ export async function initSessionState(params: {
   } else if (!sessionEntry.chatType) {
     sessionEntry.chatType = "direct";
   }
-  sessionStore[sessionKey] = sessionEntry;
+  const threadLabel = ctx.ThreadLabel?.trim();
+  if (threadLabel) {
+    sessionEntry.displayName = threadLabel;
+  }
+  const parentSessionKey = ctx.ParentSessionKey?.trim();
+  if (
+    isNewSession &&
+    parentSessionKey &&
+    parentSessionKey !== sessionKey &&
+    sessionStore[parentSessionKey]
+  ) {
+    const forked = forkSessionFromParent({
+      parentEntry: sessionStore[parentSessionKey],
+    });
+    if (forked) {
+      sessionId = forked.sessionId;
+      sessionEntry.sessionId = forked.sessionId;
+      sessionEntry.sessionFile = forked.sessionFile;
+    }
+  }
+  if (!sessionEntry.sessionFile) {
+    sessionEntry.sessionFile = resolveSessionTranscriptPath(
+      sessionEntry.sessionId,
+      agentId,
+      ctx.MessageThreadId,
+    );
+  }
+  sessionStore[sessionKey] = { ...sessionStore[sessionKey], ...sessionEntry };
   await saveSessionStore(storePath, sessionStore);
 
   const sessionCtx: TemplateContext = {
     ...ctx,
-    BodyStripped: bodyStripped ?? ctx.Body,
+    // Keep BodyStripped aligned with Body (best default for agent prompts).
+    // RawBody is reserved for command/directive parsing and may omit context.
+    BodyStripped: bodyStripped ?? ctx.Body ?? ctx.CommandBody ?? ctx.RawBody,
     SessionId: sessionId,
     IsNewSession: isNewSession ? "true" : "false",
   };

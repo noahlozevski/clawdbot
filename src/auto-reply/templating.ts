@@ -1,14 +1,32 @@
+import type { ChannelId } from "../channels/plugins/types.js";
+import type { InternalMessageChannel } from "../utils/message-channel.js";
+
+/** Valid message channels for routing. */
+export type OriginatingChannelType = ChannelId | InternalMessageChannel;
+
 export type MsgContext = {
   Body?: string;
+  /**
+   * Raw message body without structural context (history, sender labels).
+   * Legacy alias for CommandBody. Falls back to Body if not set.
+   */
+  RawBody?: string;
+  /**
+   * Prefer for command detection; RawBody is treated as legacy alias.
+   */
+  CommandBody?: string;
   From?: string;
   To?: string;
   SessionKey?: string;
   /** Provider account id (multi-account). */
   AccountId?: string;
+  ParentSessionKey?: string;
   MessageSid?: string;
   ReplyToId?: string;
   ReplyToBody?: string;
   ReplyToSender?: string;
+  ThreadStarterBody?: string;
+  ThreadLabel?: string;
   MediaPath?: string;
   MediaUrl?: string;
   MediaType?: string;
@@ -21,12 +39,13 @@ export type MsgContext = {
   GroupRoom?: string;
   GroupSpace?: string;
   GroupMembers?: string;
+  GroupSystemPrompt?: string;
   SenderName?: string;
   SenderId?: string;
   SenderUsername?: string;
   SenderTag?: string;
   SenderE164?: string;
-  /** Provider label (whatsapp|telegram|discord|imessage|...). */
+  /** Provider label (e.g. whatsapp, telegram). */
   Provider?: string;
   /** Provider surface label (e.g. discord, slack). Prefer this over `Provider` when available. */
   Surface?: string;
@@ -34,6 +53,21 @@ export type MsgContext = {
   CommandAuthorized?: boolean;
   CommandSource?: "text" | "native";
   CommandTargetSessionKey?: string;
+  /** Telegram forum topic thread ID. */
+  MessageThreadId?: number;
+  /** Telegram forum supergroup marker. */
+  IsForum?: boolean;
+  /**
+   * Originating channel for reply routing.
+   * When set, replies should be routed back to this provider
+   * instead of using lastChannel from the session.
+   */
+  OriginatingChannel?: OriginatingChannelType;
+  /**
+   * Originating destination for reply routing.
+   * The chat/channel/user ID where the reply should be sent.
+   */
+  OriginatingTo?: string;
 };
 
 export type TemplateContext = MsgContext & {

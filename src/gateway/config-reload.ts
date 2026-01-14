@@ -1,5 +1,8 @@
 import chokidar from "chokidar";
-
+import {
+  type ChannelId,
+  listChannelPlugins,
+} from "../channels/plugins/index.js";
 import type {
   ClawdbotConfig,
   ConfigFileSnapshot,
@@ -11,13 +14,7 @@ export type GatewayReloadSettings = {
   debounceMs: number;
 };
 
-export type ProviderKind =
-  | "whatsapp"
-  | "telegram"
-  | "discord"
-  | "slack"
-  | "signal"
-  | "imessage";
+export type ChannelKind = ChannelId;
 
 export type GatewayReloadPlan = {
   changedPaths: string[];
@@ -29,7 +26,7 @@ export type GatewayReloadPlan = {
   restartBrowserControl: boolean;
   restartCron: boolean;
   restartHeartbeat: boolean;
-  restartProviders: Set<ProviderKind>;
+  restartChannels: Set<ChannelKind>;
   noopPaths: string[];
 };
 
@@ -45,23 +42,23 @@ type ReloadAction =
   | "restart-browser-control"
   | "restart-cron"
   | "restart-heartbeat"
-  | "restart-provider:whatsapp"
-  | "restart-provider:telegram"
-  | "restart-provider:discord"
-  | "restart-provider:slack"
-  | "restart-provider:signal"
-  | "restart-provider:imessage";
+  | `restart-channel:${ChannelId}`;
 
 const DEFAULT_RELOAD_SETTINGS: GatewayReloadSettings = {
   mode: "hybrid",
   debounceMs: 300,
 };
 
-const RELOAD_RULES: ReloadRule[] = [
+const BASE_RELOAD_RULES: ReloadRule[] = [
   { prefix: "gateway.remote", kind: "none" },
   { prefix: "gateway.reload", kind: "none" },
   { prefix: "hooks.gmail", kind: "hot", actions: ["restart-gmail-watcher"] },
   { prefix: "hooks", kind: "hot", actions: ["reload-hooks"] },
+  {
+    prefix: "agents.defaults.heartbeat",
+    kind: "hot",
+    actions: ["restart-heartbeat"],
+  },
   { prefix: "agent.heartbeat", kind: "hot", actions: ["restart-heartbeat"] },
   { prefix: "cron", kind: "hot", actions: ["restart-cron"] },
   {
@@ -69,23 +66,24 @@ const RELOAD_RULES: ReloadRule[] = [
     kind: "hot",
     actions: ["restart-browser-control"],
   },
-  { prefix: "web", kind: "hot", actions: ["restart-provider:whatsapp"] },
-  { prefix: "telegram", kind: "hot", actions: ["restart-provider:telegram"] },
-  { prefix: "discord", kind: "hot", actions: ["restart-provider:discord"] },
-  { prefix: "slack", kind: "hot", actions: ["restart-provider:slack"] },
-  { prefix: "signal", kind: "hot", actions: ["restart-provider:signal"] },
-  { prefix: "imessage", kind: "hot", actions: ["restart-provider:imessage"] },
+];
+
+const BASE_RELOAD_RULES_TAIL: ReloadRule[] = [
   { prefix: "identity", kind: "none" },
   { prefix: "wizard", kind: "none" },
   { prefix: "logging", kind: "none" },
   { prefix: "models", kind: "none" },
+  { prefix: "agents", kind: "none" },
+  { prefix: "tools", kind: "none" },
+  { prefix: "bindings", kind: "none" },
+  { prefix: "audio", kind: "none" },
   { prefix: "agent", kind: "none" },
   { prefix: "routing", kind: "none" },
   { prefix: "messages", kind: "none" },
   { prefix: "session", kind: "none" },
-  { prefix: "whatsapp", kind: "none" },
   { prefix: "talk", kind: "none" },
   { prefix: "skills", kind: "none" },
+  { prefix: "plugins", kind: "restart" },
   { prefix: "ui", kind: "none" },
   { prefix: "gateway", kind: "restart" },
   { prefix: "bridge", kind: "restart" },
@@ -93,8 +91,39 @@ const RELOAD_RULES: ReloadRule[] = [
   { prefix: "canvasHost", kind: "restart" },
 ];
 
+let cachedReloadRules: ReloadRule[] | null = null;
+
+function listReloadRules(): ReloadRule[] {
+  if (cachedReloadRules) return cachedReloadRules;
+  // Channel docking: plugins contribute hot reload/no-op prefixes here.
+  const channelReloadRules: ReloadRule[] = listChannelPlugins().flatMap(
+    (plugin) => [
+      ...(plugin.reload?.configPrefixes ?? []).map(
+        (prefix): ReloadRule => ({
+          prefix,
+          kind: "hot",
+          actions: [`restart-channel:${plugin.id}` as ReloadAction],
+        }),
+      ),
+      ...(plugin.reload?.noopPrefixes ?? []).map(
+        (prefix): ReloadRule => ({
+          prefix,
+          kind: "none",
+        }),
+      ),
+    ],
+  );
+  const rules = [
+    ...BASE_RELOAD_RULES,
+    ...channelReloadRules,
+    ...BASE_RELOAD_RULES_TAIL,
+  ];
+  cachedReloadRules = rules;
+  return rules;
+}
+
 function matchRule(path: string): ReloadRule | null {
-  for (const rule of RELOAD_RULES) {
+  for (const rule of listReloadRules()) {
     if (path === rule.prefix || path.startsWith(`${rule.prefix}.`)) return rule;
   }
   return null;
@@ -173,11 +202,16 @@ export function buildGatewayReloadPlan(
     restartBrowserControl: false,
     restartCron: false,
     restartHeartbeat: false,
-    restartProviders: new Set(),
+    restartChannels: new Set(),
     noopPaths: [],
   };
 
   const applyAction = (action: ReloadAction) => {
+    if (action.startsWith("restart-channel:")) {
+      const channel = action.slice("restart-channel:".length) as ChannelId;
+      plan.restartChannels.add(channel);
+      return;
+    }
     switch (action) {
       case "reload-hooks":
         plan.reloadHooks = true;
@@ -193,24 +227,6 @@ export function buildGatewayReloadPlan(
         break;
       case "restart-heartbeat":
         plan.restartHeartbeat = true;
-        break;
-      case "restart-provider:whatsapp":
-        plan.restartProviders.add("whatsapp");
-        break;
-      case "restart-provider:telegram":
-        plan.restartProviders.add("telegram");
-        break;
-      case "restart-provider:discord":
-        plan.restartProviders.add("discord");
-        break;
-      case "restart-provider:slack":
-        plan.restartProviders.add("slack");
-        break;
-      case "restart-provider:signal":
-        plan.restartProviders.add("signal");
-        break;
-      case "restart-provider:imessage":
-        plan.restartProviders.add("imessage");
         break;
       default:
         break;
@@ -308,6 +324,9 @@ export function startGatewayConfigReloader(opts: {
       settings = resolveGatewayReloadSettings(nextConfig);
       if (changedPaths.length === 0) return;
 
+      opts.log.info(
+        `config change detected; evaluating reload (${changedPaths.join(", ")})`,
+      );
       const plan = buildGatewayReloadPlan(changedPaths);
       if (settings.mode === "off") {
         opts.log.info("config reload disabled (gateway.reload.mode=off)");
@@ -351,13 +370,18 @@ export function startGatewayConfigReloader(opts: {
   const watcher = chokidar.watch(opts.watchPath, {
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+    usePolling: Boolean(process.env.VITEST),
   });
 
   watcher.on("add", schedule);
   watcher.on("change", schedule);
   watcher.on("unlink", schedule);
+  let watcherClosed = false;
   watcher.on("error", (err) => {
+    if (watcherClosed) return;
+    watcherClosed = true;
     opts.log.warn(`config watcher error: ${String(err)}`);
+    void watcher.close().catch(() => {});
   });
 
   return {
@@ -365,6 +389,7 @@ export function startGatewayConfigReloader(opts: {
       stopped = true;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = null;
+      watcherClosed = true;
       await watcher.close().catch(() => {});
     },
   };

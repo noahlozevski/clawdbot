@@ -23,6 +23,45 @@ If a skill name conflicts, precedence is:
 Additionally, you can configure extra skill folders (lowest precedence) via
 `skills.load.extraDirs` in `~/.clawdbot/clawdbot.json`.
 
+## Per-agent vs shared skills
+
+In **multi-agent** setups, each agent has its own workspace. That means:
+
+- **Per-agent skills** live in `<workspace>/skills` for that agent only.
+- **Shared skills** live in `~/.clawdbot/skills` (managed/local) and are visible
+  to **all agents** on the same machine.
+- **Shared folders** can also be added via `skills.load.extraDirs` (lowest
+  precedence) if you want a common skills pack used by multiple agents.
+
+If the same skill name exists in more than one place, the usual precedence
+applies: workspace wins, then managed/local, then bundled.
+
+## Plugins + skills
+
+Plugins can ship their own skills (for example, `voice-call`) and gate them via
+`metadata.clawdbot.requires.config` on the plugin’s config entry. See
+[Plugins](/plugin) for plugin discovery/config and [Tools](/tools) for the tool
+surface those skills teach.
+
+## ClawdHub (install + sync)
+
+ClawdHub is the public skills registry for Clawdbot. Browse at
+https://clawdhub.com. Use it to discover, install, update, and back up skills.
+Full guide: [ClawdHub](/tools/clawdhub).
+
+Common flows:
+
+- Install a skill into your workspace:
+  - `clawdhub install <skill-slug>`
+- Update all installed skills:
+  - `clawdhub update --all`
+- Sync (scan + publish updates):
+  - `clawdhub sync --all`
+
+By default, `clawdhub` installs into `./skills` under your current working
+directory (or falls back to the configured Clawdbot workspace). Clawdbot picks
+that up as `<workspace>/skills` on the next session.
+
 ## Format (AgentSkills + Pi-compatible)
 
 `SKILL.md` must include at least:
@@ -79,6 +118,8 @@ metadata: {"clawdbot":{"emoji":"♊️","requires":{"bins":["gemini"]},"install"
 Notes:
 - If multiple installers are listed, the gateway picks a **single** preferred option (brew when available, otherwise node).
 - Node installs honor `skills.install.nodeManager` in `clawdbot.json` (default: npm; options: npm/pnpm/yarn/bun).
+  This only affects **skill installs**; the Gateway runtime should still be Node
+  (Bun is not recommended for WhatsApp/Telegram).
 - Go installs: if `go` is missing and `brew` is available, the gateway installs Go via Homebrew first and sets `GOBIN` to Homebrew’s `bin` when possible.
 
 If no `metadata.clawdbot` is present, the skill is always eligible (unless
@@ -133,6 +174,23 @@ This is **scoped to the agent run**, not a global shell environment.
 
 Clawdbot snapshots the eligible skills **when a session starts** and reuses that list for subsequent turns in the same session. Changes to skills or config take effect on the next new session.
 
+## Token impact (skills list)
+
+When skills are eligible, Clawdbot injects a compact XML list of available skills into the system prompt (via `formatSkillsForPrompt` in `pi-coding-agent`). The cost is deterministic:
+
+- **Base overhead (only when ≥1 skill):** 195 characters.
+- **Per skill:** 97 characters + the length of the XML-escaped `<name>`, `<description>`, and `<location>` values.
+
+Formula (characters):
+
+```
+total = 195 + Σ (97 + len(name_escaped) + len(description_escaped) + len(location_escaped))
+```
+
+Notes:
+- XML escaping expands `& < > " '` into entities (`&amp;`, `&lt;`, etc.), increasing length.
+- Token counts vary by model tokenizer. A rough OpenAI-style estimate is ~4 chars/token, so **97 chars ≈ 24 tokens** per skill plus your actual field lengths.
+
 ## Managed skills lifecycle
 
 Clawdbot ships a baseline set of skills as **bundled skills** as part of the
@@ -142,10 +200,10 @@ copy). Workspace skills are user-owned and override both on name conflicts.
 
 ## Config reference
 
-See [`docs/skills-config.md`](/tools/skills-config) for the full configuration schema.
+See [Skills config](/tools/skills-config) for the full configuration schema.
 
 ## Looking for more skills?
 
-Browse [ClawdHub](/tools/clawdhub).
+Browse https://clawdhub.com.
 
 ---

@@ -1,37 +1,52 @@
+import { normalizeAccountId } from "../routing/session-key.js";
 import type { ClawdbotConfig } from "./config.js";
 
-export type GroupPolicyProvider = "whatsapp" | "telegram" | "imessage";
+export type GroupPolicyChannel = "whatsapp" | "telegram" | "imessage";
 
-export type ProviderGroupConfig = {
+export type ChannelGroupConfig = {
   requireMention?: boolean;
 };
 
-export type ProviderGroupPolicy = {
+export type ChannelGroupPolicy = {
   allowlistEnabled: boolean;
   allowed: boolean;
-  groupConfig?: ProviderGroupConfig;
-  defaultConfig?: ProviderGroupConfig;
+  groupConfig?: ChannelGroupConfig;
+  defaultConfig?: ChannelGroupConfig;
 };
 
-type ProviderGroups = Record<string, ProviderGroupConfig>;
+type ChannelGroups = Record<string, ChannelGroupConfig>;
 
-function resolveProviderGroups(
+function resolveChannelGroups(
   cfg: ClawdbotConfig,
-  provider: GroupPolicyProvider,
-): ProviderGroups | undefined {
-  if (provider === "whatsapp") return cfg.whatsapp?.groups;
-  if (provider === "telegram") return cfg.telegram?.groups;
-  if (provider === "imessage") return cfg.imessage?.groups;
-  return undefined;
+  channel: GroupPolicyChannel,
+  accountId?: string | null,
+): ChannelGroups | undefined {
+  const normalizedAccountId = normalizeAccountId(accountId);
+  const channelConfig = cfg.channels?.[channel] as
+    | {
+        accounts?: Record<string, { groups?: ChannelGroups }>;
+        groups?: ChannelGroups;
+      }
+    | undefined;
+  if (!channelConfig) return undefined;
+  const accountGroups =
+    channelConfig.accounts?.[normalizedAccountId]?.groups ??
+    channelConfig.accounts?.[
+      Object.keys(channelConfig.accounts ?? {}).find(
+        (key) => key.toLowerCase() === normalizedAccountId.toLowerCase(),
+      ) ?? ""
+    ]?.groups;
+  return accountGroups ?? channelConfig.groups;
 }
 
-export function resolveProviderGroupPolicy(params: {
+export function resolveChannelGroupPolicy(params: {
   cfg: ClawdbotConfig;
-  provider: GroupPolicyProvider;
+  channel: GroupPolicyChannel;
   groupId?: string | null;
-}): ProviderGroupPolicy {
-  const { cfg, provider } = params;
-  const groups = resolveProviderGroups(cfg, provider);
+  accountId?: string | null;
+}): ChannelGroupPolicy {
+  const { cfg, channel } = params;
+  const groups = resolveChannelGroups(cfg, channel, params.accountId);
   const allowlistEnabled = Boolean(groups && Object.keys(groups).length > 0);
   const normalizedId = params.groupId?.trim();
   const groupConfig = normalizedId && groups ? groups[normalizedId] : undefined;
@@ -52,15 +67,16 @@ export function resolveProviderGroupPolicy(params: {
   };
 }
 
-export function resolveProviderGroupRequireMention(params: {
+export function resolveChannelGroupRequireMention(params: {
   cfg: ClawdbotConfig;
-  provider: GroupPolicyProvider;
+  channel: GroupPolicyChannel;
   groupId?: string | null;
+  accountId?: string | null;
   requireMentionOverride?: boolean;
   overrideOrder?: "before-config" | "after-config";
 }): boolean {
   const { requireMentionOverride, overrideOrder = "after-config" } = params;
-  const { groupConfig, defaultConfig } = resolveProviderGroupPolicy(params);
+  const { groupConfig, defaultConfig } = resolveChannelGroupPolicy(params);
   const configMention =
     typeof groupConfig?.requireMention === "boolean"
       ? groupConfig.requireMention

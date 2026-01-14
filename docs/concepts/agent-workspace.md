@@ -12,6 +12,13 @@ file tools and for workspace context. Keep it private and treat it as memory.
 This is separate from `~/.clawdbot/`, which stores config, credentials, and
 sessions.
 
+**Important:** the workspace is the **default cwd**, not a hard sandbox. Tools
+resolve relative paths against the workspace, but absolute paths can still reach
+elsewhere on the host unless sandboxing is enabled. If you need isolation, use
+[`agents.defaults.sandbox`](/gateway/sandboxing) (and/or per‑agent sandbox config).
+When sandboxing is enabled and `workspaceAccess` is not `"rw"`, tools operate
+inside a sandbox workspace under `~/.clawdbot/sandboxes`, not your host workspace.
+
 ## Default location
 
 - Default: `~/clawd`
@@ -36,6 +43,19 @@ file creation:
 ```json5
 { agent: { skipBootstrap: true } }
 ```
+
+## Legacy workspace folders
+
+Older installs may have created `~/clawdis` or `~/clawdbot`. Keeping multiple
+workspace directories around can cause confusing auth or state drift, because
+only one workspace is active at a time.
+
+**Recommendation:** keep a single active workspace. If you no longer use the
+legacy folders, archive or move them to Trash (for example `trash ~/clawdis`).
+If you intentionally keep multiple workspaces, make sure
+`agents.defaults.workspace` points to the active one.
+
+`clawdbot doctor` warns when it detects legacy workspace directories.
 
 ## Workspace file map (what each file means)
 
@@ -79,6 +99,8 @@ These are the standard files Clawdbot expects inside the workspace:
   - Curated long-term memory.
   - Only load in the main, private session (not shared/group contexts).
 
+See [Memory](/concepts/memory) for the workflow and automatic memory flush.
+
 - `skills/` (optional)
   - Workspace-specific skills.
   - Overrides managed/bundled skills when names collide.
@@ -87,8 +109,10 @@ These are the standard files Clawdbot expects inside the workspace:
   - Canvas UI files for node displays (for example `canvas/index.html`).
 
 If any bootstrap file is missing, Clawdbot injects a "missing file" marker into
-the session and continues. `clawdbot setup` can recreate missing defaults
-without overwriting existing files.
+the session and continues. Large bootstrap files are truncated when injected;
+adjust the limit with `agents.defaults.bootstrapMaxChars` (default: 20000).
+`clawdbot setup` can recreate missing defaults without overwriting existing
+files.
 
 ## What is NOT in the workspace
 
@@ -141,6 +165,19 @@ gh auth login
 gh repo create clawd-workspace --private --source . --remote origin --push
 ```
 
+Option C: GitLab web UI
+
+1. Create a new **private** repository on GitLab.
+2. Do not initialize with a README (avoids merge conflicts).
+3. Copy the HTTPS remote URL.
+4. Add the remote and push:
+
+```bash
+git branch -M main
+git remote add origin <https-url>
+git push -u origin main
+```
+
 ### 3) Ongoing updates
 
 ```bash
@@ -174,7 +211,7 @@ Suggested `.gitignore` starter:
 ## Moving the workspace to a new machine
 
 1. Clone the repo to the desired path (default `~/clawd`).
-2. Set `agent.workspace` to that path in `~/.clawdbot/clawdbot.json`.
+2. Set `agents.defaults.workspace` to that path in `~/.clawdbot/clawdbot.json`.
 3. Run `clawdbot setup --workspace <path>` to seed any missing files.
 4. If you need sessions, copy `~/.clawdbot/agents/<agentId>/sessions/` from the
    old machine separately.
@@ -182,6 +219,6 @@ Suggested `.gitignore` starter:
 ## Advanced notes
 
 - Multi-agent routing can use different workspaces per agent. See
-  `docs/provider-routing.md` for routing configuration.
-- If `agent.sandbox` is enabled, non-main sessions can use per-session sandbox
-  workspaces under `agent.sandbox.workspaceRoot`.
+  [Channel routing](/concepts/channel-routing) for routing configuration.
+- If `agents.defaults.sandbox` is enabled, non-main sessions can use per-session sandbox
+  workspaces under `agents.defaults.sandbox.workspaceRoot`.

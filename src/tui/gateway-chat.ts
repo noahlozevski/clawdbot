@@ -7,6 +7,10 @@ import {
   type SessionsListParams,
   type SessionsPatchParams,
 } from "../gateway/protocol/index.js";
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+} from "../utils/message-channel.js";
 import { VERSION } from "../version.js";
 
 export type GatewayConnectionOptions = {
@@ -40,10 +44,16 @@ export type GatewaySessionList = {
     updatedAt?: number | null;
     thinkingLevel?: string;
     verboseLevel?: string;
+    reasoningLevel?: string;
     sendPolicy?: string;
     model?: string;
     contextTokens?: number | null;
+    inputTokens?: number | null;
+    outputTokens?: number | null;
     totalTokens?: number | null;
+    responseUsage?: "on" | "off";
+    modelProvider?: string;
+    label?: string;
     displayName?: string;
     provider?: string;
     room?: string;
@@ -53,6 +63,16 @@ export type GatewaySessionList = {
     lastProvider?: string;
     lastTo?: string;
     lastAccountId?: string;
+  }>;
+};
+
+export type GatewayAgentsList = {
+  defaultId: string;
+  mainKey: string;
+  scope: "per-sender" | "global";
+  agents: Array<{
+    id: string;
+    name?: string;
   }>;
 };
 
@@ -88,10 +108,11 @@ export class GatewayChatClient {
       url: resolved.url,
       token: resolved.token,
       password: resolved.password,
-      clientName: "clawdbot-tui",
+      clientName: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+      clientDisplayName: "clawdbot-tui",
       clientVersion: VERSION,
       platform: process.platform,
-      mode: "tui",
+      mode: GATEWAY_CLIENT_MODES.UI,
       instanceId: randomUUID(),
       minProtocol: PROTOCOL_VERSION,
       maxProtocol: PROTOCOL_VERSION,
@@ -164,7 +185,12 @@ export class GatewayChatClient {
       activeMinutes: opts?.activeMinutes,
       includeGlobal: opts?.includeGlobal,
       includeUnknown: opts?.includeUnknown,
+      agentId: opts?.agentId,
     });
+  }
+
+  async listAgents() {
+    return await this.client.request<GatewayAgentsList>("agents.list", {});
   }
 
   async patchSession(opts: SessionsPatchParams) {

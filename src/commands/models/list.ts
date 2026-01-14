@@ -5,15 +5,20 @@ import {
   discoverAuthStorage,
   discoverModels,
 } from "@mariozechner/pi-coding-agent";
-import chalk from "chalk";
 
 import { resolveClawdbotAgentDir } from "../../agents/agent-paths.js";
+import {
+  buildAuthHealthSummary,
+  DEFAULT_OAUTH_WARN_MS,
+  formatRemainingShort,
+} from "../../agents/auth-health.js";
 import {
   type AuthProfileStore,
   ensureAuthProfileStore,
   listProfilesForProvider,
   resolveAuthProfileDisplayLabel,
   resolveAuthStorePathForDisplay,
+  resolveProfileUnusableUntilForDisplay,
 } from "../../agents/auth-profiles.js";
 import {
   getCustomProviderApiKey,
@@ -36,6 +41,11 @@ import {
   shouldEnableShellEnvFallback,
 } from "../../infra/shell-env.js";
 import type { RuntimeEnv } from "../../runtime.js";
+import {
+  colorize,
+  isRich as isRichTerminal,
+  theme,
+} from "../../terminal/theme.js";
 import { shortenHomePath } from "../../utils.js";
 import {
   DEFAULT_MODEL,
@@ -52,43 +62,35 @@ const LOCAL_PAD = 5;
 const AUTH_PAD = 5;
 
 const isRich = (opts?: { json?: boolean; plain?: boolean }) =>
-  Boolean(
-    process.stdout.isTTY && chalk.level > 0 && !opts?.json && !opts?.plain,
-  );
+  Boolean(isRichTerminal() && !opts?.json && !opts?.plain);
 
 const pad = (value: string, size: number) => value.padEnd(size);
 
-const colorize = (
-  rich: boolean,
-  color: (value: string) => string,
-  value: string,
-) => (rich ? color(value) : value);
-
 const formatKey = (key: string, rich: boolean) =>
-  colorize(rich, chalk.yellow, key);
+  colorize(rich, theme.warn, key);
 
 const formatValue = (value: string, rich: boolean) =>
-  colorize(rich, chalk.white, value);
+  colorize(rich, theme.info, value);
 
 const formatKeyValue = (
   key: string,
   value: string,
   rich: boolean,
-  valueColor: (value: string) => string = chalk.white,
+  valueColor: (value: string) => string = theme.info,
 ) => `${formatKey(key, rich)}=${colorize(rich, valueColor, value)}`;
 
-const formatSeparator = (rich: boolean) => colorize(rich, chalk.gray, " | ");
+const formatSeparator = (rich: boolean) => colorize(rich, theme.muted, " | ");
 
 const formatTag = (tag: string, rich: boolean) => {
   if (!rich) return tag;
-  if (tag === "default") return chalk.greenBright(tag);
-  if (tag === "image") return chalk.magentaBright(tag);
-  if (tag === "configured") return chalk.cyan(tag);
-  if (tag === "missing") return chalk.red(tag);
-  if (tag.startsWith("fallback#")) return chalk.yellow(tag);
-  if (tag.startsWith("img-fallback#")) return chalk.yellowBright(tag);
-  if (tag.startsWith("alias:")) return chalk.blue(tag);
-  return chalk.gray(tag);
+  if (tag === "default") return theme.success(tag);
+  if (tag === "image") return theme.accentBright(tag);
+  if (tag === "configured") return theme.accent(tag);
+  if (tag === "missing") return theme.error(tag);
+  if (tag.startsWith("fallback#")) return theme.warn(tag);
+  if (tag.startsWith("img-fallback#")) return theme.warn(tag);
+  if (tag.startsWith("alias:")) return theme.accentDim(tag);
+  return theme.muted(tag);
 };
 
 const truncate = (value: string, max: number) => {
@@ -158,6 +160,7 @@ type ProviderAuthOverview = {
   profiles: {
     count: number;
     oauth: number;
+    token: number;
     apiKey: number;
     labels: string[];
   };
@@ -172,12 +175,36 @@ function resolveProviderAuthOverview(params: {
   modelsPath: string;
 }): ProviderAuthOverview {
   const { provider, cfg, store } = params;
+  const now = Date.now();
   const profiles = listProfilesForProvider(store, provider);
+  const withUnusableSuffix = (base: string, profileId: string) => {
+    const unusableUntil = resolveProfileUnusableUntilForDisplay(
+      store,
+      profileId,
+    );
+    if (!unusableUntil || now >= unusableUntil) return base;
+    const stats = store.usageStats?.[profileId];
+    const kind =
+      typeof stats?.disabledUntil === "number" && now < stats.disabledUntil
+        ? `disabled${stats.disabledReason ? `:${stats.disabledReason}` : ""}`
+        : "cooldown";
+    const remaining = formatRemainingShort(unusableUntil - now);
+    return `${base} [${kind} ${remaining}]`;
+  };
   const labels = profiles.map((profileId) => {
     const profile = store.profiles[profileId];
     if (!profile) return `${profileId}=missing`;
     if (profile.type === "api_key") {
-      return `${profileId}=${maskApiKey(profile.key)}`;
+      return withUnusableSuffix(
+        `${profileId}=${maskApiKey(profile.key)}`,
+        profileId,
+      );
+    }
+    if (profile.type === "token") {
+      return withUnusableSuffix(
+        `${profileId}=token:${maskApiKey(profile.token)}`,
+        profileId,
+      );
     }
     const display = resolveAuthProfileDisplayLabel({ cfg, store, profileId });
     const suffix =
@@ -186,10 +213,14 @@ function resolveProviderAuthOverview(params: {
         : display.startsWith(profileId)
           ? display.slice(profileId.length).trim()
           : `(${display})`;
-    return `${profileId}=OAuth${suffix ? ` ${suffix}` : ""}`;
+    const base = `${profileId}=OAuth${suffix ? ` ${suffix}` : ""}`;
+    return withUnusableSuffix(base, profileId);
   });
   const oauthCount = profiles.filter(
     (id) => store.profiles[id]?.type === "oauth",
+  ).length;
+  const tokenCount = profiles.filter(
+    (id) => store.profiles[id]?.type === "token",
   ).length;
   const apiKeyCount = profiles.filter(
     (id) => store.profiles[id]?.type === "api_key",
@@ -226,6 +257,7 @@ function resolveProviderAuthOverview(params: {
     profiles: {
       count: profiles.length,
       oauth: oauthCount,
+      token: tokenCount,
       apiKey: apiKeyCount,
       labels,
     },
@@ -281,10 +313,10 @@ const resolveConfiguredEntries = (cfg: ClawdbotConfig) => {
 
   addEntry(resolvedDefault, "default");
 
-  const modelConfig = cfg.agent?.model as
+  const modelConfig = cfg.agents?.defaults?.model as
     | { primary?: string; fallbacks?: string[] }
     | undefined;
-  const imageModelConfig = cfg.agent?.imageModel as
+  const imageModelConfig = cfg.agents?.defaults?.imageModel as
     | { primary?: string; fallbacks?: string[] }
     | undefined;
   const modelFallbacks =
@@ -324,7 +356,7 @@ const resolveConfiguredEntries = (cfg: ClawdbotConfig) => {
     addEntry(resolved.ref, `img-fallback#${idx + 1}`);
   });
 
-  for (const key of Object.keys(cfg.agent?.models ?? {})) {
+  for (const key of Object.keys(cfg.agents?.defaults?.models ?? {})) {
     const parsed = parseModelRef(String(key ?? ""), DEFAULT_PROVIDER);
     if (!parsed) continue;
     addEntry(parsed, "configured");
@@ -392,10 +424,9 @@ function toModelRow(params: {
   const input = model.input.join("+") || "text";
   const local = isLocalBaseUrl(model.baseUrl);
   const available =
-    availableKeys?.has(modelKey(model.provider, model.id)) ||
-    (cfg && authStore
+    cfg && authStore
       ? hasAuthForProvider(model.provider, cfg, authStore)
-      : false);
+      : (availableKeys?.has(modelKey(model.provider, model.id)) ?? false);
   const aliasTags = aliases.length > 0 ? [`alias:${aliases.join(",")}`] : [];
   const mergedTags = new Set(tags);
   if (aliasTags.length > 0) {
@@ -450,7 +481,7 @@ function printModelTable(
     pad("Auth", AUTH_PAD),
     "Tags",
   ].join(" ");
-  runtime.log(rich ? chalk.bold(header) : header);
+  runtime.log(rich ? theme.heading(header) : header);
 
   for (const row of rows) {
     const keyLabel = pad(truncate(row.key, MODEL_PAD), MODEL_PAD);
@@ -470,26 +501,30 @@ function printModelTable(
 
     const coloredInput = colorize(
       rich,
-      row.input.includes("image") ? chalk.magenta : chalk.white,
+      row.input.includes("image") ? theme.accentBright : theme.info,
       inputLabel,
     );
     const coloredLocal = colorize(
       rich,
-      row.local === null ? chalk.gray : row.local ? chalk.green : chalk.gray,
+      row.local === null
+        ? theme.muted
+        : row.local
+          ? theme.success
+          : theme.muted,
       localLabel,
     );
     const coloredAuth = colorize(
       rich,
       row.available === null
-        ? chalk.gray
+        ? theme.muted
         : row.available
-          ? chalk.green
-          : chalk.red,
+          ? theme.success
+          : theme.error,
       authLabel,
     );
 
     const line = [
-      rich ? chalk.cyan(keyLabel) : keyLabel,
+      rich ? theme.accent(keyLabel) : keyLabel,
       coloredInput,
       ctxLabel,
       coloredLocal,
@@ -513,7 +548,12 @@ export async function modelsListCommand(
   ensureFlagCompatibility(opts);
   const cfg = loadConfig();
   const authStore = ensureAuthProfileStore();
-  const providerFilter = opts.provider?.trim().toLowerCase();
+  const providerFilter = (() => {
+    const raw = opts.provider?.trim();
+    if (!raw) return undefined;
+    const parsed = parseModelRef(`${raw}/_`, DEFAULT_PROVIDER);
+    return parsed?.provider ?? raw.toLowerCase();
+  })();
 
   let models: Model<Api>[] = [];
   let availableKeys: Set<string> | undefined;
@@ -594,7 +634,7 @@ export async function modelsListCommand(
 }
 
 export async function modelsStatusCommand(
-  opts: { json?: boolean; plain?: boolean },
+  opts: { json?: boolean; plain?: boolean; check?: boolean },
   runtime: RuntimeEnv,
 ) {
   ensureFlagCompatibility(opts);
@@ -605,11 +645,11 @@ export async function modelsStatusCommand(
     defaultModel: DEFAULT_MODEL,
   });
 
-  const modelConfig = cfg.agent?.model as
+  const modelConfig = cfg.agents?.defaults?.model as
     | { primary?: string; fallbacks?: string[] }
     | string
     | undefined;
-  const imageConfig = cfg.agent?.imageModel as
+  const imageConfig = cfg.agents?.defaults?.imageModel as
     | { primary?: string; fallbacks?: string[] }
     | string
     | undefined;
@@ -617,7 +657,8 @@ export async function modelsStatusCommand(
     typeof modelConfig === "string"
       ? modelConfig.trim()
       : (modelConfig?.primary?.trim() ?? "");
-  const defaultLabel = rawModel || `${resolved.provider}/${resolved.model}`;
+  const resolvedLabel = `${resolved.provider}/${resolved.model}`;
+  const defaultLabel = rawModel || resolvedLabel;
   const fallbacks =
     typeof modelConfig === "object" ? (modelConfig?.fallbacks ?? []) : [];
   const imageModel =
@@ -626,14 +667,14 @@ export async function modelsStatusCommand(
       : (imageConfig?.primary?.trim() ?? "");
   const imageFallbacks =
     typeof imageConfig === "object" ? (imageConfig?.fallbacks ?? []) : [];
-  const aliases = Object.entries(cfg.agent?.models ?? {}).reduce<
+  const aliases = Object.entries(cfg.agents?.defaults?.models ?? {}).reduce<
     Record<string, string>
   >((acc, [key, entry]) => {
     const alias = entry?.alias?.trim();
     if (alias) acc[alias] = key;
     return acc;
   }, {});
-  const allowed = Object.keys(cfg.agent?.models ?? {});
+  const allowed = Object.keys(cfg.agents?.defaults?.models ?? {});
 
   const agentDir = resolveClawdbotAgentDir();
   const store = ensureAuthProfileStore();
@@ -650,6 +691,7 @@ export async function modelsStatusCommand(
       .filter(Boolean),
   );
   const providersFromModels = new Set<string>();
+  const providersInUse = new Set<string>();
   for (const raw of [
     defaultLabel,
     ...fallbacks,
@@ -659,6 +701,15 @@ export async function modelsStatusCommand(
   ]) {
     const parsed = parseModelRef(String(raw ?? ""), DEFAULT_PROVIDER);
     if (parsed?.provider) providersFromModels.add(parsed.provider);
+  }
+  for (const raw of [
+    defaultLabel,
+    ...fallbacks,
+    imageModel,
+    ...imageFallbacks,
+  ]) {
+    const parsed = parseModelRef(String(raw ?? ""), DEFAULT_PROVIDER);
+    if (parsed?.provider) providersInUse.add(parsed.provider);
   }
 
   const providersFromEnv = new Set<string>();
@@ -676,6 +727,7 @@ export async function modelsStatusCommand(
     "openrouter",
     "zai",
     "mistral",
+    "synthetic",
   ];
   for (const provider of envProbeProviders) {
     if (resolveEnvApiKey(provider)) providersFromEnv.add(provider);
@@ -709,16 +761,83 @@ export async function modelsStatusCommand(
         Boolean(entry.modelsJson);
       return hasAny;
     });
+  const providerAuthMap = new Map(
+    providerAuth.map((entry) => [entry.provider, entry]),
+  );
+  const missingProvidersInUse = Array.from(providersInUse)
+    .filter((provider) => !providerAuthMap.has(provider))
+    .sort((a, b) => a.localeCompare(b));
 
   const providersWithOauth = providerAuth
     .filter(
-      (entry) => entry.profiles.oauth > 0 || entry.env?.value === "OAuth (env)",
+      (entry) =>
+        entry.profiles.oauth > 0 ||
+        entry.profiles.token > 0 ||
+        entry.env?.value === "OAuth (env)",
     )
     .map((entry) => {
       const count =
-        entry.profiles.oauth || (entry.env?.value === "OAuth (env)" ? 1 : 0);
+        entry.profiles.oauth +
+        entry.profiles.token +
+        (entry.env?.value === "OAuth (env)" ? 1 : 0);
       return `${entry.provider} (${count})`;
     });
+
+  const authHealth = buildAuthHealthSummary({
+    store,
+    cfg,
+    warnAfterMs: DEFAULT_OAUTH_WARN_MS,
+    providers,
+  });
+  const oauthProfiles = authHealth.profiles.filter(
+    (profile) => profile.type === "oauth" || profile.type === "token",
+  );
+
+  const unusableProfiles = (() => {
+    const now = Date.now();
+    const out: Array<{
+      profileId: string;
+      provider?: string;
+      kind: "cooldown" | "disabled";
+      reason?: string;
+      until: number;
+      remainingMs: number;
+    }> = [];
+    for (const profileId of Object.keys(store.usageStats ?? {})) {
+      const unusableUntil = resolveProfileUnusableUntilForDisplay(
+        store,
+        profileId,
+      );
+      if (!unusableUntil || now >= unusableUntil) continue;
+      const stats = store.usageStats?.[profileId];
+      const kind =
+        typeof stats?.disabledUntil === "number" && now < stats.disabledUntil
+          ? "disabled"
+          : "cooldown";
+      out.push({
+        profileId,
+        provider: store.profiles[profileId]?.provider,
+        kind,
+        reason: stats?.disabledReason,
+        until: unusableUntil,
+        remainingMs: unusableUntil - now,
+      });
+    }
+    return out.sort((a, b) => a.remainingMs - b.remainingMs);
+  })();
+
+  const checkStatus = (() => {
+    const hasExpiredOrMissing =
+      oauthProfiles.some((profile) =>
+        ["expired", "missing"].includes(profile.status),
+      ) || missingProvidersInUse.length > 0;
+    const hasExpiring = oauthProfiles.some(
+      (profile) => profile.status === "expiring",
+    );
+    if (hasExpiredOrMissing) return 1;
+    if (hasExpiring) return 2;
+    return 0;
+  })();
 
   if (opts.json) {
     runtime.log(
@@ -727,7 +846,7 @@ export async function modelsStatusCommand(
           configPath: CONFIG_PATH_CLAWDBOT,
           agentDir,
           defaultModel: defaultLabel,
-          resolvedDefault: `${resolved.provider}/${resolved.model}`,
+          resolvedDefault: resolvedLabel,
           fallbacks,
           imageModel: imageModel || null,
           imageFallbacks,
@@ -740,83 +859,101 @@ export async function modelsStatusCommand(
               appliedKeys: applied,
             },
             providersWithOAuth: providersWithOauth,
+            missingProvidersInUse,
             providers: providerAuth,
+            unusableProfiles,
+            oauth: {
+              warnAfterMs: authHealth.warnAfterMs,
+              profiles: authHealth.profiles,
+              providers: authHealth.providers,
+            },
           },
         },
         null,
         2,
       ),
     );
+    if (opts.check) {
+      runtime.exit(checkStatus);
+    }
     return;
   }
 
   if (opts.plain) {
-    runtime.log(defaultLabel);
+    runtime.log(resolvedLabel);
+    if (opts.check) {
+      runtime.exit(checkStatus);
+    }
     return;
   }
 
   const rich = isRich(opts);
-  const label = (value: string) => colorize(rich, chalk.cyan, value.padEnd(14));
+  const label = (value: string) =>
+    colorize(rich, theme.accent, value.padEnd(14));
+  const displayDefault =
+    rawModel && rawModel !== resolvedLabel
+      ? `${resolvedLabel} (from ${rawModel})`
+      : resolvedLabel;
 
   runtime.log(
-    `${label("Config")}${colorize(rich, chalk.gray, ":")} ${colorize(rich, chalk.white, CONFIG_PATH_CLAWDBOT)}`,
+    `${label("Config")}${colorize(rich, theme.muted, ":")} ${colorize(rich, theme.info, CONFIG_PATH_CLAWDBOT)}`,
   );
   runtime.log(
-    `${label("Agent dir")}${colorize(rich, chalk.gray, ":")} ${colorize(
+    `${label("Agent dir")}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      chalk.white,
+      theme.info,
       shortenHomePath(agentDir),
     )}`,
   );
   runtime.log(
-    `${label("Default")}${colorize(rich, chalk.gray, ":")} ${colorize(
+    `${label("Default")}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      chalk.green,
-      defaultLabel,
+      theme.success,
+      displayDefault,
     )}`,
   );
   runtime.log(
     `${label(`Fallbacks (${fallbacks.length || 0})`)}${colorize(
       rich,
-      chalk.gray,
+      theme.muted,
       ":",
     )} ${colorize(
       rich,
-      fallbacks.length ? chalk.yellow : chalk.gray,
+      fallbacks.length ? theme.warn : theme.muted,
       fallbacks.length ? fallbacks.join(", ") : "-",
     )}`,
   );
   runtime.log(
-    `${label("Image model")}${colorize(rich, chalk.gray, ":")} ${colorize(
+    `${label("Image model")}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      imageModel ? chalk.magenta : chalk.gray,
+      imageModel ? theme.accentBright : theme.muted,
       imageModel || "-",
     )}`,
   );
   runtime.log(
     `${label(`Image fallbacks (${imageFallbacks.length || 0})`)}${colorize(
       rich,
-      chalk.gray,
+      theme.muted,
       ":",
     )} ${colorize(
       rich,
-      imageFallbacks.length ? chalk.magentaBright : chalk.gray,
+      imageFallbacks.length ? theme.accentBright : theme.muted,
       imageFallbacks.length ? imageFallbacks.join(", ") : "-",
     )}`,
   );
   runtime.log(
     `${label(`Aliases (${Object.keys(aliases).length || 0})`)}${colorize(
       rich,
-      chalk.gray,
+      theme.muted,
       ":",
     )} ${colorize(
       rich,
-      Object.keys(aliases).length ? chalk.cyan : chalk.gray,
+      Object.keys(aliases).length ? theme.accent : theme.muted,
       Object.keys(aliases).length
         ? Object.entries(aliases)
             .map(([alias, target]) =>
               rich
-                ? `${chalk.blue(alias)} ${chalk.gray("->")} ${chalk.white(
+                ? `${theme.accentDim(alias)} ${theme.muted("->")} ${theme.info(
                     target,
                   )}`
                 : `${alias} -> ${target}`,
@@ -828,41 +965,41 @@ export async function modelsStatusCommand(
   runtime.log(
     `${label(`Configured models (${allowed.length || 0})`)}${colorize(
       rich,
-      chalk.gray,
+      theme.muted,
       ":",
     )} ${colorize(
       rich,
-      allowed.length ? chalk.white : chalk.gray,
+      allowed.length ? theme.info : theme.muted,
       allowed.length ? allowed.join(", ") : "all",
     )}`,
   );
 
   runtime.log("");
-  runtime.log(colorize(rich, chalk.bold, "Auth overview"));
+  runtime.log(colorize(rich, theme.heading, "Auth overview"));
   runtime.log(
-    `${label("Auth store")}${colorize(rich, chalk.gray, ":")} ${colorize(
+    `${label("Auth store")}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      chalk.white,
+      theme.info,
       shortenHomePath(resolveAuthStorePathForDisplay()),
     )}`,
   );
   runtime.log(
-    `${label("Shell env")}${colorize(rich, chalk.gray, ":")} ${colorize(
+    `${label("Shell env")}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      shellFallbackEnabled ? chalk.green : chalk.gray,
+      shellFallbackEnabled ? theme.success : theme.muted,
       shellFallbackEnabled ? "on" : "off",
     )}${
       applied.length
-        ? colorize(rich, chalk.gray, ` (applied: ${applied.join(", ")})`)
+        ? colorize(rich, theme.muted, ` (applied: ${applied.join(", ")})`)
         : ""
     }`,
   );
   runtime.log(
     `${label(
-      `Providers w/ OAuth (${providersWithOauth.length || 0})`,
-    )}${colorize(rich, chalk.gray, ":")} ${colorize(
+      `Providers w/ OAuth/tokens (${providersWithOauth.length || 0})`,
+    )}${colorize(rich, theme.muted, ":")} ${colorize(
       rich,
-      providersWithOauth.length ? chalk.white : chalk.gray,
+      providersWithOauth.length ? theme.info : theme.muted,
       providersWithOauth.length ? providersWithOauth.join(", ") : "-",
     )}`,
   );
@@ -873,9 +1010,9 @@ export async function modelsStatusCommand(
     bits.push(
       formatKeyValue(
         "effective",
-        `${colorize(rich, chalk.magenta, entry.effective.kind)}:${colorize(
+        `${colorize(rich, theme.accentBright, entry.effective.kind)}:${colorize(
           rich,
-          chalk.gray,
+          theme.muted,
           entry.effective.detail,
         )}`,
         rich,
@@ -886,7 +1023,7 @@ export async function modelsStatusCommand(
       bits.push(
         formatKeyValue(
           "profiles",
-          `${entry.profiles.count} (oauth=${entry.profiles.oauth}, api_key=${entry.profiles.apiKey})`,
+          `${entry.profiles.count} (oauth=${entry.profiles.oauth}, token=${entry.profiles.token}, api_key=${entry.profiles.apiKey})`,
           rich,
         ),
       );
@@ -898,18 +1035,76 @@ export async function modelsStatusCommand(
       bits.push(
         formatKeyValue(
           "env",
-          `${entry.env.value} (${entry.env.source})`,
+          `${entry.env.value}${separator}${formatKeyValue(
+            "source",
+            entry.env.source,
+            rich,
+          )}`,
           rich,
-          chalk.gray,
         ),
       );
     }
     if (entry.modelsJson) {
       bits.push(
-        formatKeyValue("models.json", entry.modelsJson.value, rich, chalk.gray),
+        formatKeyValue(
+          "models.json",
+          `${entry.modelsJson.value}${separator}${formatKeyValue(
+            "source",
+            entry.modelsJson.source,
+            rich,
+          )}`,
+          rich,
+        ),
       );
     }
-    const providerLabel = colorize(rich, chalk.cyan, entry.provider);
-    runtime.log(`${providerLabel}: ${bits.join(separator)}`);
+    runtime.log(`- ${theme.heading(entry.provider)} ${bits.join(separator)}`);
+  }
+
+  if (missingProvidersInUse.length > 0) {
+    runtime.log("");
+    runtime.log(colorize(rich, theme.heading, "Missing auth"));
+    for (const provider of missingProvidersInUse) {
+      const hint =
+        provider === "anthropic"
+          ? "Run `claude setup-token` or `clawdbot configure`."
+          : "Run `clawdbot configure` or set an API key env var.";
+      runtime.log(`- ${theme.heading(provider)} ${hint}`);
+    }
+  }
+
+  runtime.log("");
+  runtime.log(colorize(rich, theme.heading, "OAuth/token status"));
+  if (oauthProfiles.length === 0) {
+    runtime.log(colorize(rich, theme.muted, "- none"));
+    return;
+  }
+
+  const formatStatus = (status: string) => {
+    if (status === "ok") return colorize(rich, theme.success, "ok");
+    if (status === "static") return colorize(rich, theme.muted, "static");
+    if (status === "expiring") return colorize(rich, theme.warn, "expiring");
+    if (status === "missing") return colorize(rich, theme.warn, "unknown");
+    return colorize(rich, theme.error, "expired");
+  };
+
+  for (const profile of oauthProfiles) {
+    const labelText = profile.label || profile.profileId;
+    const label = colorize(rich, theme.accent, labelText);
+    const status = formatStatus(profile.status);
+    const expiry =
+      profile.status === "static"
+        ? ""
+        : profile.expiresAt
+          ? ` expires in ${formatRemainingShort(profile.remainingMs)}`
+          : " expires unknown";
+    const source =
+      profile.source !== "store"
+        ? colorize(rich, theme.muted, ` (${profile.source})`)
+        : "";
+    runtime.log(`- ${label} ${status}${expiry}${source}`);
+  }
+
+  if (opts.check) {
+    runtime.exit(checkStatus);
   }
 }

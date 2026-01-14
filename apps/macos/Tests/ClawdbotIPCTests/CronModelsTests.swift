@@ -12,7 +12,7 @@ struct CronModelsTests {
     }
 
     @Test func scheduleEveryEncodesAndDecodesWithAnchor() throws {
-        let schedule = CronSchedule.every(everyMs: 5_000, anchorMs: 10_000)
+        let schedule = CronSchedule.every(everyMs: 5000, anchorMs: 10000)
         let data = try JSONEncoder().encode(schedule)
         let decoded = try JSONDecoder().decode(CronSchedule.self, from: data)
         #expect(decoded == schedule)
@@ -31,12 +31,33 @@ struct CronModelsTests {
             thinking: "low",
             timeoutSeconds: 15,
             deliver: true,
-            channel: "whatsapp",
+            provider: "whatsapp",
             to: "+15551234567",
             bestEffortDeliver: false)
         let data = try JSONEncoder().encode(payload)
         let decoded = try JSONDecoder().decode(CronPayload.self, from: data)
         #expect(decoded == payload)
+    }
+
+    @Test func jobEncodesAndDecodesDeleteAfterRun() throws {
+        let job = CronJob(
+            id: "job-1",
+            agentId: nil,
+            name: "One-shot",
+            description: nil,
+            enabled: true,
+            deleteAfterRun: true,
+            createdAtMs: 0,
+            updatedAtMs: 0,
+            schedule: .at(atMs: 1_700_000_000_000),
+            sessionTarget: .main,
+            wakeMode: .now,
+            payload: .systemEvent(text: "ping"),
+            isolation: nil,
+            state: CronJobState())
+        let data = try JSONEncoder().encode(job)
+        let decoded = try JSONDecoder().decode(CronJob.self, from: data)
+        #expect(decoded.deleteAfterRun == true)
     }
 
     @Test func scheduleDecodeRejectsUnknownKind() {
@@ -60,9 +81,11 @@ struct CronModelsTests {
     @Test func displayNameTrimsWhitespaceAndFallsBack() {
         let base = CronJob(
             id: "x",
+            agentId: nil,
             name: "  hello  ",
             description: nil,
             enabled: true,
+            deleteAfterRun: nil,
             createdAtMs: 0,
             updatedAtMs: 0,
             schedule: .at(atMs: 0),
@@ -81,9 +104,11 @@ struct CronModelsTests {
     @Test func nextRunDateAndLastRunDateDeriveFromState() {
         let job = CronJob(
             id: "x",
+            agentId: nil,
             name: "t",
             description: nil,
             enabled: true,
+            deleteAfterRun: nil,
             createdAtMs: 0,
             updatedAtMs: 0,
             schedule: .at(atMs: 0),

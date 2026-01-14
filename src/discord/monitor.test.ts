@@ -2,14 +2,18 @@ import type { Guild } from "@buape/carbon";
 import { describe, expect, it } from "vitest";
 import {
   allowListMatches,
+  buildDiscordMediaPayload,
   type DiscordGuildEntryResolved,
   isDiscordGroupAllowedByPolicy,
   normalizeDiscordAllowList,
   normalizeDiscordSlug,
+  registerDiscordListener,
   resolveDiscordChannelConfig,
   resolveDiscordGuildEntry,
   resolveDiscordReplyTarget,
+  resolveDiscordShouldRequireMention,
   resolveGroupDmAllow,
+  sanitizeDiscordThreadName,
   shouldEmitDiscordReactionNotification,
 } from "./monitor.js";
 
@@ -30,6 +34,18 @@ const makeEntries = (
   }
   return out;
 };
+
+describe("registerDiscordListener", () => {
+  class FakeListener {}
+
+  it("dedupes listeners by constructor", () => {
+    const listeners: object[] = [];
+
+    expect(registerDiscordListener(listeners, new FakeListener())).toBe(true);
+    expect(registerDiscordListener(listeners, new FakeListener())).toBe(false);
+    expect(listeners).toHaveLength(1);
+  });
+});
 
 describe("discord allowlist helpers", () => {
   it("normalizes slugs", () => {
@@ -95,7 +111,15 @@ describe("discord guild/channel resolution", () => {
     const guildInfo: DiscordGuildEntryResolved = {
       channels: {
         general: { allow: true },
-        help: { allow: true, requireMention: true },
+        help: {
+          allow: true,
+          requireMention: true,
+          skills: ["search"],
+          enabled: false,
+          users: ["123"],
+          systemPrompt: "Use short answers.",
+          autoThread: true,
+        },
       },
     };
     const channel = resolveDiscordChannelConfig({
@@ -115,6 +139,11 @@ describe("discord guild/channel resolution", () => {
     });
     expect(help?.allowed).toBe(true);
     expect(help?.requireMention).toBe(true);
+    expect(help?.skills).toEqual(["search"]);
+    expect(help?.enabled).toBe(false);
+    expect(help?.users).toEqual(["123"]);
+    expect(help?.systemPrompt).toBe("Use short answers.");
+    expect(help?.autoThread).toBe(true);
   });
 
   it("denies channel when config present but no match", () => {
@@ -130,6 +159,54 @@ describe("discord guild/channel resolution", () => {
       channelSlug: "random",
     });
     expect(channel?.allowed).toBe(false);
+  });
+});
+
+describe("discord mention gating", () => {
+  it("requires mention by default", () => {
+    const guildInfo: DiscordGuildEntryResolved = {
+      requireMention: true,
+      channels: {
+        general: { allow: true },
+      },
+    };
+    const channelConfig = resolveDiscordChannelConfig({
+      guildInfo,
+      channelId: "1",
+      channelName: "General",
+      channelSlug: "general",
+    });
+    expect(
+      resolveDiscordShouldRequireMention({
+        isGuildMessage: true,
+        isThread: false,
+        channelConfig,
+        guildInfo,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not require mention inside autoThread threads", () => {
+    const guildInfo: DiscordGuildEntryResolved = {
+      requireMention: true,
+      channels: {
+        general: { allow: true, autoThread: true },
+      },
+    };
+    const channelConfig = resolveDiscordChannelConfig({
+      guildInfo,
+      channelId: "1",
+      channelName: "General",
+      channelSlug: "general",
+    });
+    expect(
+      resolveDiscordShouldRequireMention({
+        isGuildMessage: true,
+        isThread: true,
+        channelConfig,
+        guildInfo,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -263,6 +340,21 @@ describe("discord reply target selection", () => {
   });
 });
 
+describe("discord autoThread name sanitization", () => {
+  it("strips mentions and collapses whitespace", () => {
+    const name = sanitizeDiscordThreadName(
+      "  <@123>  <@&456> <#789>  Help   here  ",
+      "msg-1",
+    );
+    expect(name).toBe("Help here");
+  });
+
+  it("falls back to thread + id when empty after cleaning", () => {
+    const name = sanitizeDiscordThreadName("   <@123>", "abc");
+    expect(name).toBe("Thread abc");
+  });
+});
+
 describe("discord reaction notification gating", () => {
   it("defaults to own when mode is unset", () => {
     expect(
@@ -344,5 +436,28 @@ describe("discord reaction notification gating", () => {
         allowlist: ["123", "other"],
       }),
     ).toBe(true);
+  });
+});
+
+describe("discord media payload", () => {
+  it("preserves attachment order for MediaPaths/MediaUrls", () => {
+    const payload = buildDiscordMediaPayload([
+      { path: "/tmp/a.png", contentType: "image/png" },
+      { path: "/tmp/b.png", contentType: "image/png" },
+      { path: "/tmp/c.png", contentType: "image/png" },
+    ]);
+    expect(payload.MediaPath).toBe("/tmp/a.png");
+    expect(payload.MediaUrl).toBe("/tmp/a.png");
+    expect(payload.MediaType).toBe("image/png");
+    expect(payload.MediaPaths).toEqual([
+      "/tmp/a.png",
+      "/tmp/b.png",
+      "/tmp/c.png",
+    ]);
+    expect(payload.MediaUrls).toEqual([
+      "/tmp/a.png",
+      "/tmp/b.png",
+      "/tmp/c.png",
+    ]);
   });
 });

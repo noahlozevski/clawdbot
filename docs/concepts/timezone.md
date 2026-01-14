@@ -21,12 +21,12 @@ The timestamp in the envelope is **always UTC**, with minutes precision.
 
 ## Tool payloads (raw provider data)
 
-Tool calls (`discord.readMessages`, `slack.readMessages`, etc.) return **raw provider timestamps**.
+Tool calls (`channels.discord.readMessages`, `channels.slack.readMessages`, etc.) return **raw provider timestamps**.
 These are typically UTC ISO strings (Discord) or UTC epoch strings (Slack). We do not rewrite them.
 
 ## User timezone for the system prompt
 
-Set `agent.userTimezone` to tell the model the user's local time zone. If it is
+Set `agents.defaults.userTimezone` to tell the model the user's local time zone. If it is
 unset, Clawdbot resolves the **host timezone at runtime** (no config write).
 
 ```json5

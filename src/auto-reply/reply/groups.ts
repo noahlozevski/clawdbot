@@ -1,48 +1,16 @@
+import { getChannelDock } from "../../channels/dock.js";
+import {
+  getChatChannelMeta,
+  normalizeChannelId,
+} from "../../channels/registry.js";
 import type { ClawdbotConfig } from "../../config/config.js";
-import { resolveProviderGroupRequireMention } from "../../config/group-policy.js";
 import type {
   GroupKeyResolution,
   SessionEntry,
 } from "../../config/sessions.js";
+import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { normalizeGroupActivation } from "../group-activation.js";
 import type { TemplateContext } from "../templating.js";
-
-function normalizeDiscordSlug(value?: string | null) {
-  if (!value) return "";
-  let text = value.trim().toLowerCase();
-  if (!text) return "";
-  text = text.replace(/^[@#]+/, "");
-  text = text.replace(/[\s_]+/g, "-");
-  text = text.replace(/[^a-z0-9-]+/g, "-");
-  text = text.replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-  return text;
-}
-
-function normalizeSlackSlug(raw?: string | null) {
-  const trimmed = raw?.trim().toLowerCase() ?? "";
-  if (!trimmed) return "";
-  const dashed = trimmed.replace(/\s+/g, "-");
-  const cleaned = dashed.replace(/[^a-z0-9#@._+-]+/g, "-");
-  return cleaned.replace(/-{2,}/g, "-").replace(/^[-.]+|[-.]+$/g, "");
-}
-
-function resolveDiscordGuildEntry(
-  guilds: NonNullable<ClawdbotConfig["discord"]>["guilds"],
-  groupSpace?: string,
-) {
-  if (!guilds || Object.keys(guilds).length === 0) return null;
-  const space = groupSpace?.trim();
-  if (space && guilds[space]) return guilds[space];
-  const normalized = normalizeDiscordSlug(space);
-  if (normalized && guilds[normalized]) return guilds[normalized];
-  if (normalized) {
-    const match = Object.values(guilds).find(
-      (entry) => normalizeDiscordSlug(entry?.slug ?? undefined) === normalized,
-    );
-    if (match) return match;
-  }
-  return guilds["*"] ?? null;
-}
 
 export function resolveGroupRequireMention(params: {
   cfg: ClawdbotConfig;
@@ -50,74 +18,22 @@ export function resolveGroupRequireMention(params: {
   groupResolution?: GroupKeyResolution;
 }): boolean {
   const { cfg, ctx, groupResolution } = params;
-  const provider =
-    groupResolution?.provider ?? ctx.Provider?.trim().toLowerCase();
+  const rawChannel = groupResolution?.channel ?? ctx.Provider?.trim();
+  const channel = normalizeChannelId(rawChannel);
+  if (!channel) return true;
   const groupId = groupResolution?.id ?? ctx.From?.replace(/^group:/, "");
   const groupRoom = ctx.GroupRoom?.trim() ?? ctx.GroupSubject?.trim();
   const groupSpace = ctx.GroupSpace?.trim();
-  if (
-    provider === "telegram" ||
-    provider === "whatsapp" ||
-    provider === "imessage"
-  ) {
-    return resolveProviderGroupRequireMention({
-      cfg,
-      provider,
-      groupId,
-    });
-  }
-  if (provider === "discord") {
-    const guildEntry = resolveDiscordGuildEntry(
-      cfg.discord?.guilds,
-      groupSpace,
-    );
-    const channelEntries = guildEntry?.channels;
-    if (channelEntries && Object.keys(channelEntries).length > 0) {
-      const channelSlug = normalizeDiscordSlug(groupRoom);
-      const entry =
-        (groupId ? channelEntries[groupId] : undefined) ??
-        (channelSlug
-          ? (channelEntries[channelSlug] ?? channelEntries[`#${channelSlug}`])
-          : undefined) ??
-        (groupRoom
-          ? channelEntries[normalizeDiscordSlug(groupRoom)]
-          : undefined);
-      if (entry && typeof entry.requireMention === "boolean") {
-        return entry.requireMention;
-      }
-    }
-    if (typeof guildEntry?.requireMention === "boolean") {
-      return guildEntry.requireMention;
-    }
-    return true;
-  }
-  if (provider === "slack") {
-    const channels = cfg.slack?.channels ?? {};
-    const keys = Object.keys(channels);
-    if (keys.length === 0) return true;
-    const channelId = groupId?.trim();
-    const channelName = groupRoom?.replace(/^#/, "");
-    const normalizedName = normalizeSlackSlug(channelName);
-    const candidates = [
-      channelId ?? "",
-      channelName ? `#${channelName}` : "",
-      channelName ?? "",
-      normalizedName,
-    ].filter(Boolean);
-    let matched: { requireMention?: boolean } | undefined;
-    for (const candidate of candidates) {
-      if (candidate && channels[candidate]) {
-        matched = channels[candidate];
-        break;
-      }
-    }
-    const fallback = channels["*"];
-    const resolved = matched ?? fallback;
-    if (typeof resolved?.requireMention === "boolean") {
-      return resolved.requireMention;
-    }
-    return true;
-  }
+  const requireMention = getChannelDock(
+    channel,
+  )?.groups?.resolveRequireMention?.({
+    cfg,
+    groupId,
+    groupRoom,
+    groupSpace,
+    accountId: ctx.AccountId,
+  });
+  if (typeof requireMention === "boolean") return requireMention;
   return true;
 }
 
@@ -128,6 +44,7 @@ export function defaultGroupActivation(
 }
 
 export function buildGroupIntro(params: {
+  cfg: ClawdbotConfig;
   sessionCtx: TemplateContext;
   sessionEntry?: SessionEntry;
   defaultActivation: "always" | "mention";
@@ -138,14 +55,14 @@ export function buildGroupIntro(params: {
     params.defaultActivation;
   const subject = params.sessionCtx.GroupSubject?.trim();
   const members = params.sessionCtx.GroupMembers?.trim();
-  const provider = params.sessionCtx.Provider?.trim().toLowerCase();
+  const rawProvider = params.sessionCtx.Provider?.trim();
+  const providerKey = rawProvider?.toLowerCase() ?? "";
+  const providerId = normalizeChannelId(rawProvider);
   const providerLabel = (() => {
-    if (!provider) return "chat";
-    if (provider === "whatsapp") return "WhatsApp";
-    if (provider === "telegram") return "Telegram";
-    if (provider === "discord") return "Discord";
-    if (provider === "webchat") return "WebChat";
-    return `${provider.at(0)?.toUpperCase() ?? ""}${provider.slice(1)}`;
+    if (!providerKey) return "chat";
+    if (isInternalMessageChannel(providerKey)) return "WebChat";
+    if (providerId) return getChatChannelMeta(providerId).label;
+    return `${providerKey.at(0)?.toUpperCase() ?? ""}${providerKey.slice(1)}`;
   })();
   const subjectLine = subject
     ? `You are replying inside the ${providerLabel} group "${subject}".`
@@ -155,23 +72,39 @@ export function buildGroupIntro(params: {
     activation === "always"
       ? "Activation: always-on (you receive every group message)."
       : "Activation: trigger-only (you are invoked only when explicitly mentioned; recent context may be included).";
+  const groupId = params.sessionCtx.From?.replace(/^group:/, "");
+  const groupRoom = params.sessionCtx.GroupRoom?.trim() ?? subject;
+  const groupSpace = params.sessionCtx.GroupSpace?.trim();
+  const providerIdsLine = providerId
+    ? getChannelDock(providerId)?.groups?.resolveGroupIntroHint?.({
+        cfg: params.cfg,
+        groupId,
+        groupRoom,
+        groupSpace,
+        accountId: params.sessionCtx.AccountId,
+      })
+    : undefined;
   const silenceLine =
     activation === "always"
-      ? `If no response is needed, reply with exactly "${params.silentToken}" (no other text) so Clawdbot stays silent.`
+      ? `If no response is needed, reply with exactly "${params.silentToken}" (and nothing else) so Clawdbot stays silent. Do not add any other words, punctuation, tags, markdown/code blocks, or explanations.`
       : undefined;
   const cautionLine =
     activation === "always"
-      ? "Be extremely selective: reply only when you are directly addressed, asked a question, or can add clear value. Otherwise stay silent."
+      ? "Be extremely selective: reply only when directly addressed or clearly helpful. Otherwise stay silent."
       : undefined;
   const lurkLine =
-    "Be a good group participant: lurk and follow the conversation, but only chime in when you have something genuinely helpful or relevant to add. Don't feel obligated to respond to every message — quality over quantity. Even when lurking silently, you can use emoji reactions to acknowledge messages, show support, or react to humor — reactions are always appreciated and don't clutter the chat.";
+    "Be a good group participant: mostly lurk and follow the conversation; reply only when directly addressed or you can add clear value. Emoji reactions are welcome when available.";
+  const styleLine =
+    "Write like a human. Avoid Markdown tables. Don't type literal \\n sequences; use real line breaks sparingly.";
   return [
     subjectLine,
     membersLine,
     activationLine,
+    providerIdsLine,
     silenceLine,
     cautionLine,
     lurkLine,
+    styleLine,
   ]
     .filter(Boolean)
     .join(" ")

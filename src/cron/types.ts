@@ -1,3 +1,5 @@
+import type { ChannelId } from "../channels/plugins/types.js";
+
 export type CronSchedule =
   | { kind: "at"; atMs: number }
   | { kind: "every"; everyMs: number; anchorMs?: number }
@@ -6,22 +8,19 @@ export type CronSchedule =
 export type CronSessionTarget = "main" | "isolated";
 export type CronWakeMode = "next-heartbeat" | "now";
 
+export type CronMessageChannel = ChannelId | "last";
+
 export type CronPayload =
   | { kind: "systemEvent"; text: string }
   | {
       kind: "agentTurn";
       message: string;
+      /** Optional model override (provider/model or alias). */
+      model?: string;
       thinking?: string;
       timeoutSeconds?: number;
       deliver?: boolean;
-      provider?:
-        | "last"
-        | "whatsapp"
-        | "telegram"
-        | "discord"
-        | "slack"
-        | "signal"
-        | "imessage";
+      channel?: CronMessageChannel;
       to?: string;
       bestEffortDeliver?: boolean;
     };
@@ -41,9 +40,11 @@ export type CronJobState = {
 
 export type CronJob = {
   id: string;
+  agentId?: string;
   name: string;
   description?: string;
   enabled: boolean;
+  deleteAfterRun?: boolean;
   createdAtMs: number;
   updatedAtMs: number;
   schedule: CronSchedule;

@@ -1,8 +1,8 @@
 ---
-summary: "Agent tool surface for Clawdbot (browser, canvas, nodes, cron) replacing clawdbot-* skills"
+summary: "Agent tool surface for Clawdbot (browser, canvas, nodes, message, cron) replacing legacy `clawdbot-*` skills"
 read_when:
   - Adding or modifying agent tools
-  - Retiring or changing clawdbot-* skills
+  - Retiring or changing `clawdbot-*` skills
 ---
 
 # Tools (Clawdbot)
@@ -13,22 +13,100 @@ and the agent should rely on them directly.
 
 ## Disabling tools
 
-You can globally allow/deny tools via `agent.tools` in `clawdbot.json`
-(deny wins). This prevents disallowed tools from being sent to providers.
+You can globally allow/deny tools via `tools.allow` / `tools.deny` in `clawdbot.json`
+(deny wins). This prevents disallowed tools from being sent to model providers.
 
 ```json5
 {
-  agent: {
-    tools: {
-      deny: ["browser"]
-    }
+  tools: { deny: ["browser"] }
+}
+```
+
+## Tool profiles (base allowlist)
+
+`tools.profile` sets a **base tool allowlist** before `tools.allow`/`tools.deny`.
+Per-agent override: `agents.list[].tools.profile`.
+
+Profiles:
+- `minimal`: `session_status` only
+- `coding`: `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`
+- `messaging`: `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `session_status`
+- `full`: no restriction (same as unset)
+
+Example (messaging-only by default, allow Slack + Discord tools too):
+```json5
+{
+  tools: {
+    profile: "messaging",
+    allow: ["slack", "discord"]
   }
 }
 ```
 
+Example (coding profile, but deny exec/process everywhere):
+```json5
+{
+  tools: {
+    profile: "coding",
+    deny: ["group:runtime"]
+  }
+}
+```
+
+Example (global coding profile, messaging-only support agent):
+```json5
+{
+  tools: { profile: "coding" },
+  agents: {
+    list: [
+      {
+        id: "support",
+        tools: { profile: "messaging", allow: ["slack"] }
+      }
+    ]
+  }
+}
+```
+
+## Tool groups (shorthands)
+
+Tool policies (global, agent, sandbox) support `group:*` entries that expand to multiple tools.
+Use these in `tools.allow` / `tools.deny`.
+
+Available groups:
+- `group:runtime`: `exec`, `bash`, `process`
+- `group:fs`: `read`, `write`, `edit`, `apply_patch`
+- `group:sessions`: `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status`
+- `group:memory`: `memory_search`, `memory_get`
+- `group:ui`: `browser`, `canvas`
+- `group:automation`: `cron`, `gateway`
+- `group:messaging`: `message`
+- `group:nodes`: `nodes`
+- `group:clawdbot`: all built-in Clawdbot tools (excludes provider plugins)
+
+Example (allow only file tools + browser):
+```json5
+{
+  tools: {
+    allow: ["group:fs", "browser"]
+  }
+}
+```
+
+## Plugins + tools
+
+Plugins can register **additional tools** (and CLI commands) beyond the core set.
+See [Plugins](/plugin) for install + config, and [Skills](/tools/skills) for how
+tool usage guidance is injected into prompts. Some plugins ship their own skills
+alongside tools (for example, the voice-call plugin).
+
 ## Tool inventory
 
-### `bash`
+### `apply_patch`
+Apply structured patches across one or more files. Use for multi-hunk edits.
+Experimental: enable via `tools.exec.applyPatch.enabled` (OpenAI models only).
+
+### `exec`
 Run shell commands in the workspace.
 
 Core parameters:
@@ -36,15 +114,18 @@ Core parameters:
 - `yieldMs` (auto-background after timeout, default 10000)
 - `background` (immediate background)
 - `timeout` (seconds; kills the process if exceeded, default 1800)
-- `elevated` (bool; run on host if elevated mode is enabled/allowed)
+- `elevated` (bool; run on host if elevated mode is enabled/allowed; only changes behavior when the agent is sandboxed)
 - Need a real TTY? Use the tmux skill.
 
 Notes:
 - Returns `status: "running"` with a `sessionId` when backgrounded.
 - Use `process` to poll/log/write/kill/clear background sessions.
+- If `process` is disallowed, `exec` runs synchronously and ignores `yieldMs`/`background`.
+- `elevated` is gated by `tools.elevated` plus any `agents.list[].tools.elevated` override (both must allow) and runs on the host.
+- `elevated` only changes behavior when the agent is sandboxed (otherwise it’s a no-op).
 
 ### `process`
-Manage background bash sessions.
+Manage background exec sessions.
 
 Core actions:
 - `list`, `poll`, `log`, `write`, `kill`, `clear`, `remove`
@@ -52,6 +133,7 @@ Core actions:
 Notes:
 - `poll` returns new output and exit status when complete.
 - `log` supports line-based `offset`/`limit` (omit `offset` to grab the last N lines).
+- `process` is scoped per agent; sessions from other agents are not visible.
 
 ### `browser`
 Control the dedicated clawd browser.
@@ -80,8 +162,9 @@ Notes:
 - Profile names: lowercase alphanumeric + hyphens only (max 64 chars).
 - Port range: 18800-18899 (~100 profiles max).
 - Remote profiles are attach-only (no start/stop/reset).
-- `snapshot` defaults to `ai`; use `aria` for the accessibility tree.
-- `act` requires `ref` from `snapshot --format ai`; use `evaluate` for rare CSS selector needs.
+- `snapshot` defaults to `ai` when Playwright is installed; use `aria` for the accessibility tree.
+- `snapshot` also supports role-snapshot options (`interactive`, `compact`, `depth`, `selector`) which return refs like `e12`.
+- `act` requires `ref` from `snapshot` (numeric `12` from AI snapshots, or `e12` from role snapshots); use `evaluate` for rare CSS selector needs.
 - Avoid `act` → `wait` by default; use it only in exceptional cases (no reliable UI state to wait on).
 - `upload` can optionally pass a `ref` to auto-click after arming.
 - `upload` also supports `inputRef` (aria ref) or `element` (CSS selector) to set `<input type="file">` directly.
@@ -98,7 +181,7 @@ Notes:
 - Uses gateway `node.invoke` under the hood.
 - If no `node` is provided, the tool picks a default (single connected node or local mac node).
 - A2UI is v0.8 only (no `createSurface`); the CLI rejects v0.9 JSONL with line errors.
-- Quick smoke: `clawdbot canvas a2ui push --text "Hello from A2UI"`.
+- Quick smoke: `clawdbot nodes canvas a2ui push --node <id> --text "Hello from A2UI"`.
 
 ### `nodes`
 Discover and target paired nodes; send notifications; capture camera/screen.
@@ -107,6 +190,7 @@ Core actions:
 - `status`, `describe`
 - `pending`, `approve`, `reject` (pairing)
 - `notify` (macOS `system.notify`)
+- `run` (macOS `system.run`)
 - `camera_snap`, `camera_clip`, `screen_record`
 - `location_get`
 
@@ -115,6 +199,20 @@ Notes:
 - Images return image blocks + `MEDIA:<path>`.
 - Videos return `FILE:<path>` (mp4).
 - Location returns a JSON payload (lat/lon/accuracy/timestamp).
+- `run` params: `command` argv array; optional `cwd`, `env` (`KEY=VAL`), `commandTimeoutMs`, `invokeTimeoutMs`, `needsScreenRecording`.
+
+Example (`run`):
+```json
+{
+  "action": "run",
+  "node": "office-mac",
+  "command": ["echo", "Hello"],
+  "env": ["FOO=bar"],
+  "commandTimeoutMs": 12000,
+  "invokeTimeoutMs": 45000,
+  "needsScreenRecording": false
+}
+```
 
 ### `image`
 Analyze an image with the configured image model.
@@ -126,8 +224,33 @@ Core parameters:
 - `maxBytesMb` (optional size cap)
 
 Notes:
-- Only available when `agent.imageModel` is configured (primary or fallbacks).
+- Only available when `agents.defaults.imageModel` is configured (primary or fallbacks), or when an implicit image model can be inferred from your default model + configured auth (best-effort pairing).
 - Uses the image model directly (independent of the main chat model).
+
+### `message`
+Send messages and channel actions across Discord/Slack/Telegram/WhatsApp/Signal/iMessage/MS Teams.
+
+Core actions:
+- `send` (text + optional media)
+- `poll` (WhatsApp/Discord/MS Teams polls)
+- `react` / `reactions` / `read` / `edit` / `delete`
+- `pin` / `unpin` / `list-pins`
+- `permissions`
+- `thread-create` / `thread-list` / `thread-reply`
+- `search`
+- `sticker`
+- `member-info` / `role-info`
+- `emoji-list` / `emoji-upload` / `sticker-upload`
+- `role-add` / `role-remove`
+- `channel-info` / `channel-list`
+- `voice-status`
+- `event-list` / `event-create`
+- `timeout` / `kick` / `ban`
+
+Notes:
+- `send` routes WhatsApp via the Gateway; other channels go direct.
+- `poll` uses the Gateway for WhatsApp and MS Teams; Discord polls go direct.
+- When a message tool call is bound to an active chat session, sends are constrained to that session’s target to avoid cross-context leaks.
 
 ### `cron`
 Manage Gateway cron jobs and wakeups.
@@ -142,68 +265,44 @@ Notes:
 - `update` uses `{ id, patch }`.
 
 ### `gateway`
-Restart the running Gateway process (in-place).
+Restart or apply updates to the running Gateway process (in-place).
 
 Core actions:
-- `restart` (sends `SIGUSR1` to the current process; `clawdbot gateway`/`gateway-daemon` restart in-place)
+- `restart` (sends `SIGUSR1` to the current process; `clawdbot gateway` restart in-place)
+- `config.get` / `config.schema`
+- `config.apply` (validate + write config + restart + wake)
+- `update.run` (run update + restart + wake)
 
 Notes:
 - Use `delayMs` (defaults to 2000) to avoid interrupting an in-flight reply.
+- `restart` is disabled by default; enable with `commands.restart: true`.
 
-### `sessions_list` / `sessions_history` / `sessions_send`
+### `sessions_list` / `sessions_history` / `sessions_send` / `sessions_spawn` / `session_status`
 List sessions, inspect transcript history, or send to another session.
 
 Core parameters:
 - `sessions_list`: `kinds?`, `limit?`, `activeMinutes?`, `messageLimit?` (0 = none)
 - `sessions_history`: `sessionKey`, `limit?`, `includeTools?`
 - `sessions_send`: `sessionKey`, `message`, `timeoutSeconds?` (0 = fire-and-forget)
+- `sessions_spawn`: `task`, `label?`, `agentId?`, `model?`, `runTimeoutSeconds?`, `cleanup?`
+- `session_status`: `sessionKey?` (default current), `model?` (`default` clears override)
 
 Notes:
 - `main` is the canonical direct-chat key; global/unknown are hidden.
 - `messageLimit > 0` fetches last N messages per session (tool messages filtered).
 - `sessions_send` waits for final completion when `timeoutSeconds > 0`.
+- Delivery/announce happens after completion and is best-effort; `status: "ok"` confirms the agent run finished, not that the announce was delivered.
+- `sessions_spawn` starts a sub-agent run and posts an announce reply back to the requester chat.
+- `sessions_spawn` is non-blocking and returns `status: "accepted"` immediately.
 - `sessions_send` runs a reply‑back ping‑pong (reply `REPLY_SKIP` to stop; max turns via `session.agentToAgent.maxPingPongTurns`, 0–5).
 - After the ping‑pong, the target agent runs an **announce step**; reply `ANNOUNCE_SKIP` to suppress the announcement.
 
-### `discord`
-Send Discord reactions, stickers, or polls.
-
-Core actions:
-- `react` (`channelId`, `messageId`, `emoji`)
-- `reactions` (`channelId`, `messageId`, optional `limit`)
-- `sticker` (`to`, `stickerIds`, optional `content`)
-- `poll` (`to`, `question`, `answers`, optional `allowMultiselect`, `durationHours`, `content`)
-- `permissions` (`channelId`)
-- `readMessages` (`channelId`, optional `limit`/`before`/`after`/`around`)
-- `sendMessage` (`to`, `content`, optional `mediaUrl`, `replyTo`)
-- `editMessage` (`channelId`, `messageId`, `content`)
-- `deleteMessage` (`channelId`, `messageId`)
-- `threadCreate` (`channelId`, `name`, optional `messageId`, `autoArchiveMinutes`)
-- `threadList` (`guildId`, optional `channelId`, `includeArchived`, `before`, `limit`)
-- `threadReply` (`channelId`, `content`, optional `mediaUrl`, `replyTo`)
-- `pinMessage`/`unpinMessage` (`channelId`, `messageId`)
-- `listPins` (`channelId`)
-- `searchMessages` (`guildId`, `content`, optional `channelId`/`channelIds`, `authorId`/`authorIds`, `limit`)
-- `memberInfo` (`guildId`, `userId`)
-- `roleInfo` (`guildId`)
-- `emojiList` (`guildId`)
-- `roleAdd`/`roleRemove` (`guildId`, `userId`, `roleId`)
-- `channelInfo` (`channelId`)
-- `channelList` (`guildId`)
-- `voiceStatus` (`guildId`, `userId`)
-- `eventList` (`guildId`)
-- `eventCreate` (`guildId`, `name`, `startTime`, optional `endTime`, `description`, `channelId`, `entityType`, `location`)
-- `timeout` (`guildId`, `userId`, optional `durationMinutes`, `until`, `reason`)
-- `kick` (`guildId`, `userId`, optional `reason`)
-- `ban` (`guildId`, `userId`, optional `reason`, `deleteMessageDays`)
+### `agents_list`
+List agent ids that the current session may target with `sessions_spawn`.
 
 Notes:
-- `to` accepts `channel:<id>` or `user:<id>`.
-- Polls require 2–10 answers and default to 24 hours.
-- `reactions` returns per-emoji user lists (limited to 100 per reaction).
-- `discord.actions.*` gates Discord tool actions; `roles` + `moderation` default to `false`.
-- `searchMessages` follows the Discord preview spec (limit max 25, channel/author filters accept arrays).
-- The tool is only exposed when the current provider is Discord.
+- Result is restricted to per-agent allowlists (`agents.list[].subagents.allowAgents`).
+- When `["*"]` is configured, the tool includes all configured agents and marks `allowAny: true`.
 
 ## Parameters (common)
 
@@ -231,33 +330,20 @@ Canvas render:
 Node targeting:
 1) `nodes` → `status`
 2) `describe` on the chosen node
-3) `notify` / `camera_snap` / `screen_record`
+3) `notify` / `run` / `camera_snap` / `screen_record`
 
 ## Safety
 
-- Avoid `system.run` (not exposed as a tool).
+- Avoid direct `system.run`; use `nodes` → `run` only with explicit user consent.
 - Respect user consent for camera/screen capture.
 - Use `status/describe` to ensure permissions before invoking media commands.
 
-## How the model sees tools (pi-mono internals)
+## How tools are presented to the agent
 
-Tools are exposed to the model in **two parallel channels**:
+Tools are exposed in two parallel channels:
 
-1) **System prompt text**: a human-readable list + guidelines.
-2) **Provider tool schema**: the actual function/tool declarations sent to the model API.
+1) **System prompt text**: a human-readable list + guidance.
+2) **Tool schema**: the structured function definitions sent to the model API.
 
-In pi-mono:
-- System prompt builder: [`packages/coding-agent/src/core/system-prompt.ts`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/src/core/system-prompt.ts)
-  - Builds the `Available tools:` list from `toolDescriptions`.
-  - Appends skills and project context.
-- Tool schemas passed to providers:
-  - OpenAI: [`packages/ai/src/providers/openai-responses.ts`](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/openai-responses.ts) (`convertTools`)
-  - Anthropic: [`packages/ai/src/providers/anthropic.ts`](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/anthropic.ts) (`convertTools`)
-  - Gemini: [`packages/ai/src/providers/google-shared.ts`](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/providers/google-shared.ts) (`convertTools`)
-- Tool execution loop:
-  - Agent loop: [`packages/ai/src/agent/agent-loop.ts`](https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/agent/agent-loop.ts)
-  - Validates tool arguments and executes tools, then appends `toolResult` messages.
-
-In Clawdbot:
-- System prompt append: [`src/agents/system-prompt.ts`](https://github.com/clawdbot/clawdbot/blob/main/src/agents/system-prompt.ts)
-- Tool list injected via `createClawdbotCodingTools()` in [`src/agents/pi-tools.ts`](https://github.com/clawdbot/clawdbot/blob/main/src/agents/pi-tools.ts)
+That means the agent sees both “what tools exist” and “how to call them.” If a tool
+doesn’t appear in the system prompt or the schema, the model cannot call it.

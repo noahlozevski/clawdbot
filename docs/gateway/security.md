@@ -34,20 +34,29 @@ Clawdbot’s stance:
 - **Scope next:** decide where the bot is allowed to act (group allowlists + mention gating, tools, sandboxing, device permissions).
 - **Model last:** assume the model can be manipulated; design so manipulation has limited blast radius.
 
+## Plugins/extensions
+
+Plugins run **in-process** with the Gateway. Treat them as trusted code:
+
+- Only install plugins from sources you trust.
+- Prefer explicit `plugins.allow` allowlists.
+- Review plugin config before enabling.
+- Restart the Gateway after plugin changes.
+
 ## DM access model (pairing / allowlist / open / disabled)
 
-All current DM-capable providers support a DM policy (`dmPolicy` or `*.dm.policy`) that gates inbound DMs **before** the message is processed:
+All current DM-capable channels support a DM policy (`dmPolicy` or `*.dm.policy`) that gates inbound DMs **before** the message is processed:
 
-- `pairing` (default): unknown senders receive a short pairing code and the bot ignores their message until approved.
+- `pairing` (default): unknown senders receive a short pairing code and the bot ignores their message until approved. Codes expire after 1 hour; repeated DMs won’t resend a code until a new request is created. Pending requests are capped at **3 per channel** by default.
 - `allowlist`: unknown senders are blocked (no pairing handshake).
-- `open`: allow anyone to DM (public). **Requires** the provider allowlist to include `"*"` (explicit opt-in).
+- `open`: allow anyone to DM (public). **Requires** the channel allowlist to include `"*"` (explicit opt-in).
 - `disabled`: ignore inbound DMs entirely.
 
 Approve via CLI:
 
 ```bash
-clawdbot pairing list --provider <provider>
-clawdbot pairing approve --provider <provider> <code>
+clawdbot pairing list <channel>
+clawdbot pairing approve <channel> <code>
 ```
 
 Details + files on disk: [Pairing](/start/pairing)
@@ -56,13 +65,14 @@ Details + files on disk: [Pairing](/start/pairing)
 
 Clawdbot has two separate “who can trigger me?” layers:
 
-- **DM allowlist** (`allowFrom` / `discord.dm.allowFrom` / `slack.dm.allowFrom`): who is allowed to talk to the bot in direct messages.
-  - When `dmPolicy="pairing"`, approvals are written to `~/.clawdbot/credentials/<provider>-allowFrom.json` (merged with config allowlists).
-- **Group allowlist** (provider-specific): which groups/channels/guilds the bot will accept messages from at all.
+- **DM allowlist** (`allowFrom` / `channels.discord.dm.allowFrom` / `channels.slack.dm.allowFrom`): who is allowed to talk to the bot in direct messages.
+  - When `dmPolicy="pairing"`, approvals are written to `~/.clawdbot/credentials/<channel>-allowFrom.json` (merged with config allowlists).
+- **Group allowlist** (channel-specific): which groups/channels/guilds the bot will accept messages from at all.
   - Common patterns:
-    - `whatsapp.groups`, `telegram.groups`, `imessage.groups`: per-group defaults like `requireMention`; when set, it also acts as a group allowlist (include `"*"` to keep allow-all behavior).
-    - `groupPolicy="allowlist"` + `groupAllowFrom`: restrict who can trigger the bot *inside* a group session (WhatsApp/Telegram/Signal/iMessage).
-    - `discord.guilds` / `slack.channels`: per-surface allowlists + mention defaults.
+    - `channels.whatsapp.groups`, `channels.telegram.groups`, `channels.imessage.groups`: per-group defaults like `requireMention`; when set, it also acts as a group allowlist (include `"*"` to keep allow-all behavior).
+    - `groupPolicy="allowlist"` + `groupAllowFrom`: restrict who can trigger the bot *inside* a group session (WhatsApp/Telegram/Signal/iMessage/Microsoft Teams).
+    - `channels.discord.guilds` / `channels.slack.channels`: per-surface allowlists + mention defaults.
+  - **Security note:** treat `dmPolicy="open"` and `groupPolicy="open"` as last-resort settings. They should be barely used; prefer pairing + allowlists unless you fully trust every member of the room.
 
 Details: [Configuration](/gateway/configuration) and [Groups](/concepts/groups)
 
@@ -76,6 +86,13 @@ Even with strong system prompts, **prompt injection is not solved**. What helps 
 - Treat links and pasted instructions as hostile by default.
 - Run sensitive tool execution in a sandbox; keep secrets out of the agent’s reachable filesystem.
 - **Model choice matters:** we recommend Anthropic Opus 4.5 because it’s quite good at recognizing prompt injections (see [“A step forward on safety”](https://www.anthropic.com/news/claude-opus-4-5)). Using weaker models increases risk.
+
+## Reasoning & verbose output in groups
+
+`/reasoning` and `/verbose` can expose internal reasoning or tool output that
+was not meant for a public channel. In group settings, treat them as **debug
+only** and keep them off unless you explicitly need them. If you enable them,
+do so only in trusted DMs or tightly controlled rooms.
 
 ## Lessons Learned (The Hard Way)
 
@@ -95,11 +112,58 @@ This is social engineering 101. Create distrust, encourage snooping.
 
 ## Configuration Hardening (examples)
 
+### 0) File permissions
+
+Keep config + state private on the gateway host:
+- `~/.clawdbot/clawdbot.json`: `600` (user read/write only)
+- `~/.clawdbot`: `700` (user only)
+
+`clawdbot doctor` can warn and offer to tighten these permissions.
+
+### 0.5) Lock down the Gateway WebSocket (local auth)
+
+Gateway auth is **only** enforced when you set `gateway.auth`. If it’s unset,
+loopback WS clients are unauthenticated — any local process can connect and call
+`config.apply`.
+
+The onboarding wizard now generates a token by default (even for loopback) so
+local clients must authenticate. If you skip the wizard or remove auth, you’re
+back to open loopback.
+
+Set a token so **all** WS clients must authenticate:
+
+```json5
+{
+  gateway: {
+    auth: { mode: "token", token: "your-token" }
+  }
+}
+```
+
+Doctor can generate one for you: `clawdbot doctor --generate-gateway-token`.
+
+Note: `gateway.remote.token` is **only** for remote CLI calls; it does not
+protect local WS access.
+
+### 0.6) Tailscale Serve identity headers
+
+When `gateway.auth.allowTailscale` is `true` (default for Serve), Clawdbot
+accepts Tailscale Serve identity headers (`tailscale-user-login`) as
+authentication. This only triggers for requests that hit loopback and include
+`x-forwarded-for`, `x-forwarded-proto`, and `x-forwarded-host` as injected by
+Tailscale.
+
+**Security rule:** do not forward these headers from your own reverse proxy. If
+you terminate TLS or proxy in front of the gateway, disable
+`gateway.auth.allowTailscale` and use token/password auth instead.
+
+See [Tailscale](/gateway/tailscale) and [Web overview](/web).
+
 ### 1) DMs: pairing by default
 
 ```json5
 {
-  whatsapp: { dmPolicy: "pairing" }
+  channels: { whatsapp: { dmPolicy: "pairing" } }
 }
 ```
 
@@ -107,15 +171,20 @@ This is social engineering 101. Create distrust, encourage snooping.
 
 ```json
 {
-  "whatsapp": {
-    "groups": {
-      "*": { "requireMention": true }
+  "channels": {
+    "whatsapp": {
+      "groups": {
+        "*": { "requireMention": true }
+      }
     }
   },
-  "routing": {
-    "groupChat": {
-      "mentionPatterns": ["@clawd", "@mybot"]
-    }
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "groupChat": { "mentionPatterns": ["@clawd", "@mybot"] }
+      }
+    ]
   }
 }
 ```
@@ -128,25 +197,118 @@ Consider running your AI on a separate phone number from your personal one:
 - Personal number: Your conversations stay private
 - Bot number: AI handles these, with appropriate boundaries
 
-### 4. Read-Only Mode (Future)
+### 4. Read-Only Mode (Today, via sandbox + tools)
 
-We're considering a `readOnlyMode` flag that prevents the AI from:
-- Writing files outside a sandbox
-- Executing shell commands
-- Sending messages
+You can already build a read-only profile by combining:
+- `agents.defaults.sandbox.workspaceAccess: "ro"` (or `"none"` for no workspace access)
+- tool allow/deny lists that block `write`, `edit`, `apply_patch`, `exec`, `process`, etc.
+
+We may add a single `readOnlyMode` flag later to simplify this configuration.
 
 ## Sandboxing (recommended)
+
+Dedicated doc: [Sandboxing](/gateway/sandboxing)
 
 Two complementary approaches:
 
 - **Run the full Gateway in Docker** (container boundary): [Docker](/install/docker)
-- **Tool sandbox** (`agent.sandbox`, host gateway + Docker-isolated tools): [Configuration](/gateway/configuration)
+- **Tool sandbox** (`agents.defaults.sandbox`, host gateway + Docker-isolated tools): [Sandboxing](/gateway/sandboxing)
 
-Note: to prevent cross-agent access, keep `sandbox.scope` at `"agent"` (default)
+Note: to prevent cross-agent access, keep `agents.defaults.sandbox.scope` at `"agent"` (default)
 or `"session"` for stricter per-session isolation. `scope: "shared"` uses a
 single container/workspace.
 
-Important: `agent.elevated` is an explicit escape hatch that runs bash on the host. Keep `agent.elevated.allowFrom` tight and don’t enable it for strangers.
+Also consider agent workspace access inside the sandbox:
+- `agents.defaults.sandbox.workspaceAccess: "none"` (default) keeps the agent workspace off-limits; tools run against a sandbox workspace under `~/.clawdbot/sandboxes`
+- `agents.defaults.sandbox.workspaceAccess: "ro"` mounts the agent workspace read-only at `/agent` (disables `write`/`edit`/`apply_patch`)
+- `agents.defaults.sandbox.workspaceAccess: "rw"` mounts the agent workspace read/write at `/workspace`
+
+Important: `tools.elevated` is the global baseline escape hatch that runs exec on the host. Keep `tools.elevated.allowFrom` tight and don’t enable it for strangers. You can further restrict elevated per agent via `agents.list[].tools.elevated`. See [Elevated Mode](/tools/elevated).
+
+## Browser control risks
+
+Enabling browser control gives the model the ability to drive a real browser.
+If that browser profile already contains logged-in sessions, the model can
+access those accounts and data. Treat browser profiles as **sensitive state**:
+- Prefer a dedicated profile for the agent (the default `clawd` profile).
+- Avoid pointing the agent at your personal daily-driver profile.
+- Keep host browser control disabled for sandboxed agents unless you trust them.
+
+## Per-agent access profiles (multi-agent)
+
+With multi-agent routing, each agent can have its own sandbox + tool policy:
+use this to give **full access**, **read-only**, or **no access** per agent.
+See [Multi-Agent Sandbox & Tools](/multi-agent-sandbox-tools) for full details
+and precedence rules.
+
+Common use cases:
+- Personal agent: full access, no sandbox
+- Family/work agent: sandboxed + read-only tools
+- Public agent: sandboxed + no filesystem/shell tools
+
+### Example: full access (no sandbox)
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "personal",
+        workspace: "~/clawd-personal",
+        sandbox: { mode: "off" }
+      }
+    ]
+  }
+}
+```
+
+### Example: read-only tools + read-only workspace
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "family",
+        workspace: "~/clawd-family",
+        sandbox: {
+          mode: "all",
+          scope: "agent",
+          workspaceAccess: "ro"
+        },
+        tools: {
+          allow: ["read"],
+          deny: ["write", "edit", "apply_patch", "exec", "process", "browser"]
+        }
+      }
+    ]
+  }
+}
+```
+
+### Example: no filesystem/shell access (provider messaging allowed)
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "public",
+        workspace: "~/clawd-public",
+        sandbox: {
+          mode: "all",
+          scope: "agent",
+          workspaceAccess: "none"
+        },
+        tools: {
+          allow: ["sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status", "whatsapp", "telegram", "slack", "discord", "gateway"],
+          deny: ["read", "write", "edit", "apply_patch", "exec", "process", "browser", "canvas", "nodes", "cron", "gateway", "image"]
+        }
+      }
+    ]
+  }
+}
+```
 
 ## What to Tell Your AI
 
@@ -192,7 +354,7 @@ Mario asking for find ~
 
 ## Reporting Security Issues
 
-Found a vulnerability in CLAWDBOT? Please report responsibly:
+Found a vulnerability in Clawdbot? Please report responsibly:
 
 1. Email: security@clawd.bot
 2. Don't post publicly until fixed
